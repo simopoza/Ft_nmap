@@ -1,0 +1,13 @@
+# Build objects
+obj/
+
+# Binary
+ft_nmap
+
+# Project files not to keep in git
+ft_nmap-correction-page.pdf
+project-overview.md
+
+# Editor swap / backup files
+*~
+*.swp
