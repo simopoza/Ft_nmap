@@ -5,10 +5,10 @@ CFLAGS = -Wall -Wextra -Werror -I./includes
 SRC_DIR = src
 OBJ_DIR = obj
 
-SRCS = $(SRC_DIR)/main.c $(SRC_DIR)/args.c $(SRC_DIR)/ports.c $(SRC_DIR)/scan.c $(SRC_DIR)/resolve.c
+SRCS = $(SRC_DIR)/main.c $(SRC_DIR)/args.c $(SRC_DIR)/ports.c $(SRC_DIR)/scan.c $(SRC_DIR)/resolve.c $(SRC_DIR)/packet.c $(SRC_DIR)/pcap.c
 OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-LIBS = -lpthread
+LIBS = -lpcap -lpthread
 
 all: $(NAME)
 
