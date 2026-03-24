@@ -24,16 +24,54 @@ int main(int argc, char **argv)
 
     // Print summary
     printf("\nScan completed in %.2f seconds\n", elapsed);
-    printf("Open ports:\n");
-    printf("Port\tService\tState\n");
+
+    /* Determine which scan columns to show based on requested scans */
+    int active_idxs[SCAN_COUNT];
+    const char *active_names[SCAN_COUNT];
+    int active_count = 0;
+    if (args.scan_type & SCAN_SYN)  { active_idxs[active_count] = SCAN_IDX_SYN;  active_names[active_count++] = "SYN"; }
+    if (args.scan_type & SCAN_NULL) { active_idxs[active_count] = SCAN_IDX_NULL; active_names[active_count++] = "NULL"; }
+    if (args.scan_type & SCAN_ACK)  { active_idxs[active_count] = SCAN_IDX_ACK;  active_names[active_count++] = "ACK"; }
+    if (args.scan_type & SCAN_FIN)  { active_idxs[active_count] = SCAN_IDX_FIN;  active_names[active_count++] = "FIN"; }
+    if (args.scan_type & SCAN_XMAS) { active_idxs[active_count] = SCAN_IDX_XMAS; active_names[active_count++] = "XMAS"; }
+    if (args.scan_type & SCAN_UDP)  { active_idxs[active_count] = SCAN_IDX_UDP;  active_names[active_count++] = "UDP"; }
+
+    /* Header */
+    printf("%-6s %-12s", "Port", "Service");
+    for (int a = 0; a < active_count; a++)
+        printf(" %-9s", active_names[a]);
+    printf("\n");
+
+    /* Counters per active scan */
+    int cnt_open[SCAN_COUNT] = {0};
+    int cnt_closed[SCAN_COUNT] = {0};
+    int cnt_filtered[SCAN_COUNT] = {0};
+
+    /* Rows */
     for (int i = 0; i < args.port_count; i++)
     {
         t_result *r = &args.results[i];
-        if (r->scan_results[SCAN_IDX_SYN] == STATUS_OPEN)
+        struct servent *s = getservbyport(htons(r->port), "tcp");
+    printf("%-6d %-12s", r->port, s ? s->s_name : "-");
+        for (int a = 0; a < active_count; a++)
         {
-            struct servent *s = getservbyport(htons(r->port), "tcp");
-            printf("%d\t%s\topen\n", r->port, s ? s->s_name : "-");
+            uint8_t st = r->scan_results[active_idxs[a]];
+            const char *st_str = (st == STATUS_OPEN) ? "open" : (st == STATUS_CLOSED) ? "closed" : (st == STATUS_FILTERED) ? "filtered" : "-";
+            if (st == STATUS_OPEN) cnt_open[active_idxs[a]]++;
+            else if (st == STATUS_CLOSED) cnt_closed[active_idxs[a]]++;
+            else if (st == STATUS_FILTERED) cnt_filtered[active_idxs[a]]++;
+
+            printf(" %-9s", st_str);
         }
+        printf("\n");
+    }
+
+    /* Summary counts */
+    printf("\nSummary:\n");
+    for (int a = 0; a < active_count; a++)
+    {
+        int idx = active_idxs[a];
+        printf("%s: %d open, %d closed, %d filtered\n", active_names[a], cnt_open[idx], cnt_closed[idx], cnt_filtered[idx]);
     }
 
     // Cleanup
