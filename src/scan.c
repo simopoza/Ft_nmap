@@ -102,6 +102,16 @@ void start_scan(t_nmap_args *args)
     pthread_mutex_init(&args->mutex_port, NULL);
     args->current_port_idx = 0;
 
+    /* Allocate results array to store per-port scan outcomes */
+    args->results = calloc(args->port_count, sizeof(t_result));
+    if (!args->results)
+    {
+        perror("calloc results");
+        pthread_mutex_destroy(&args->mutex_port);
+        free(threads_pool);
+        exit(1);
+    }
+
     printf("\nScanning...\n");
 
     // Start threads

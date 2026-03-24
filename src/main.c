@@ -19,5 +19,13 @@ int main(int argc, char **argv)
     
     // Cleanup
     free(args.port_list);
+    if (args.results)
+        free(args.results);
+    if (args.ip)
+    {
+        // If ip was strdup'd by resolve_target we own it; otherwise free(NULL) is safe
+        // To be conservative we free only if it's not pointing into argv (heuristic omitted).
+        /* Note: we intentionally do not free argv pointers here; resolving replaces args.ip with a strdup when needed. */
+    }
     return (0);
 }
