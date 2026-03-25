@@ -36,49 +36,92 @@ int main(int argc, char **argv)
     if (args.scan_type & SCAN_XMAS) { active_idxs[active_count] = SCAN_IDX_XMAS; active_names[active_count++] = "XMAS"; }
     if (args.scan_type & SCAN_UDP)  { active_idxs[active_count] = SCAN_IDX_UDP;  active_names[active_count++] = "UDP"; }
 
-    /* Header */
-    printf("%-6s %-12s", "Port", "Service");
-    for (int a = 0; a < active_count; a++)
-        printf(" %-9s", active_names[a]);
-    printf("\n");
+    /* Build per-port presentation and split Open vs Others to match correction screenshots */
+    // Prepare arrays
+    int *is_open = calloc(args.port_count, sizeof(int));
+    char **results_str = calloc(args.port_count, sizeof(char *));
+    if (!is_open || !results_str) { perror("calloc"); exit(1); }
 
-    /* Counters per active scan */
-    int cnt_open[SCAN_COUNT] = {0};
-    int cnt_closed[SCAN_COUNT] = {0};
-    int cnt_filtered[SCAN_COUNT] = {0};
-
-    /* Rows */
     for (int i = 0; i < args.port_count; i++)
     {
         t_result *r = &args.results[i];
+        // build per-scan results like: SYN(Open) NULL(Closed) FIN(Closed)
+        char buf[512];
+        buf[0] = '\0';
+        int any_open = 0;
+        for (int a = 0; a < active_count; a++)
+        {
+            int sidx = active_idxs[a];
+            uint8_t st = r->scan_results[sidx];
+            const char *label = active_names[a];
+            const char *stname;
+            if (st == STATUS_OPEN) { stname = "Open"; any_open = 1; }
+            else if (st == STATUS_CLOSED) stname = "Closed";
+            else if (st == STATUS_FILTERED) stname = "Filtered";
+            else if (st == STATUS_UNFILTERED) stname = "Unfiltered";
+            else if (st == STATUS_OPEN_FILTERED) { stname = "Open|Filtered"; any_open = 1; }
+            else stname = "-";
+
+            if (a > 0) strncat(buf, " ", sizeof(buf)-strlen(buf)-1);
+            strncat(buf, label, sizeof(buf)-strlen(buf)-1);
+            strncat(buf, "(", sizeof(buf)-strlen(buf)-1);
+            strncat(buf, stname, sizeof(buf)-strlen(buf)-1);
+            strncat(buf, ")", sizeof(buf)-strlen(buf)-1);
+        }
+        results_str[i] = strdup(buf);
+        is_open[i] = any_open;
+    }
+
+    // Print Open ports table
+    printf("Open ports:\n");
+    printf("Port  Service Name (if applicable)   Results\n");
+    printf("--------------------------------------------------------------\n");
+    for (int i = 0; i < args.port_count; i++)
+    {
+        if (!is_open[i]) continue;
+        t_result *r = &args.results[i];
         struct servent *s = getservbyport(htons(r->port), "tcp");
-    printf("%-6d %-12s", r->port, s ? s->s_name : "-");
+        printf("%-5d %-30s %s\n", r->port, s ? s->s_name : "Unassigned", results_str[i]);
+    }
+
+    // Print Others table
+    printf("\nClosed/Filtered/Unfiltered ports:\n");
+    printf("Port  Service Name (if applicable)   Results\t\tConclusion\n");
+    printf("-----------------------------------------------------------------------\n");
+    for (int i = 0; i < args.port_count; i++)
+    {
+        if (is_open[i]) continue;
+        t_result *r = &args.results[i];
+        struct servent *s = getservbyport(htons(r->port), "tcp");
+
+        // Determine conclusion
+        const char *concl = "Filtered";
+        int any_unfiltered = 0;
+        int any_openfiltered = 0;
+        int all_closed = 1;
         for (int a = 0; a < active_count; a++)
         {
             uint8_t st = r->scan_results[active_idxs[a]];
-            const char *st_str;
-            if (st == STATUS_OPEN) st_str = "open";
-            else if (st == STATUS_CLOSED) st_str = "closed";
-            else if (st == STATUS_FILTERED) st_str = "filtered";
-            else if (st == STATUS_UNFILTERED) st_str = "unfiltered";
-            else if (st == STATUS_OPEN_FILTERED) st_str = "open|filtered";
-            else st_str = "-";
-            if (st == STATUS_OPEN) cnt_open[active_idxs[a]]++;
-            else if (st == STATUS_CLOSED) cnt_closed[active_idxs[a]]++;
-            else if (st == STATUS_FILTERED) cnt_filtered[active_idxs[a]]++;
-
-            printf(" %-9s", st_str);
+            if (st == STATUS_OPEN) { all_closed = 0; any_unfiltered = 0; concl = "Open"; break; }
+            if (st == STATUS_UNFILTERED) any_unfiltered = 1;
+            if (st == STATUS_OPEN_FILTERED) any_openfiltered = 1;
+            if (st != STATUS_CLOSED) all_closed = 0;
         }
-        printf("\n");
+        if (strcmp(concl, "Open") != 0)
+        {
+            if (any_unfiltered) concl = "Unfiltered";
+            else if (any_openfiltered) concl = "Open|Filtered";
+            else if (all_closed) concl = "Closed";
+            else concl = "Filtered";
+        }
+
+        printf("%-5d %-30s %s\t%s\n", r->port, s ? s->s_name : "Unassigned", results_str[i], concl);
     }
 
-    /* Summary counts */
-    printf("\nSummary:\n");
-    for (int a = 0; a < active_count; a++)
-    {
-        int idx = active_idxs[a];
-        printf("%s: %d open, %d closed, %d filtered\n", active_names[a], cnt_open[idx], cnt_closed[idx], cnt_filtered[idx]);
-    }
+    // Free temporary storage
+    for (int i = 0; i < args.port_count; i++) if (results_str[i]) free(results_str[i]);
+    free(results_str);
+    free(is_open);
 
     // Cleanup
     free(args.port_list);
