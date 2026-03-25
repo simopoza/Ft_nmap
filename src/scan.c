@@ -8,6 +8,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <netdb.h>
+#include <pcap/pcap.h>
 
 // Simple connect scan function (Step 4)
 static bool is_open_connect(t_nmap_args *args, uint16_t port)
@@ -129,8 +130,7 @@ static void *scan_sender_worker(void *arg)
     if (!args->local_ip)
         args->local_ip = get_local_ip_for_dest(args->ip);
 
-    /* seed rand for source port selection (use pid to vary between runs) */
-    srand((unsigned int)(time(NULL) ^ getpid()));
+    /* sender threads use preallocated source ports (map_to_srcport) */
 
     while (1)
     {
@@ -155,34 +155,22 @@ static void *scan_sender_worker(void *arg)
 
             // Skip UDP here (not yet implemented)
             if (sidx == SCAN_IDX_UDP)
-                continue;
-
-            // Allocate a random source port within our reserved range and reserve it
-            uint16_t src_port = 0;
-            int attempts = 0;
-            while (1)
             {
-                int r = rand() % SRC_PORT_RANGE; /* 0..SRC_PORT_RANGE-1 */
-                src_port = (uint16_t)(SRC_PORT_BASE + r);
+                ; /* UDP will still have a preallocated src port in map_to_srcport */
+            }
+
+            /* Look up preallocated source port for this probe */
+            int map_v = index * SCAN_COUNT + sidx;
+            uint16_t src_port = 0;
+            if (args->map_to_srcport && args->map_to_srcport[map_v] > 0)
+                src_port = (uint16_t)args->map_to_srcport[map_v];
+            else
+            {
+                /* if for some reason no preallocation exists, fall back to deterministic mapping */
+                src_port = (uint16_t)(SRC_PORT_BASE + (map_v % SRC_PORT_RANGE));
                 pthread_mutex_lock(&args->map_mutex);
-                if (args->srcport_map[src_port] == -1)
-                {
-                    int map_v = index * SCAN_COUNT + sidx;
-                    args->srcport_map[src_port] = map_v;
-                    pthread_mutex_unlock(&args->map_mutex);
-                    break;
-                }
+                args->srcport_map[src_port] = map_v;
                 pthread_mutex_unlock(&args->map_mutex);
-                attempts++;
-                if (attempts > 1000)
-                {
-                    /* fallback deterministic allocation */
-                    src_port = (uint16_t)(SRC_PORT_BASE + ((index * SCAN_COUNT + sidx) % SRC_PORT_RANGE));
-                    pthread_mutex_lock(&args->map_mutex);
-                    args->srcport_map[src_port] = index * SCAN_COUNT + sidx;
-                    pthread_mutex_unlock(&args->map_mutex);
-                    break;
-                }
             }
 
             // Determine flags for this scan and send
@@ -303,7 +291,118 @@ void start_scan(t_nmap_args *args)
             if (args->pcap_handle == NULL)
                 fprintf(stderr, "Warning: pcap handle not ready, proceeding without capture readiness\n");
 
-            // Create sender threads that will send the requested probes
+            /* Pre-allocate and reserve source ports for all planned probes so we can set a precise pcap filter
+               and avoid ephemeral port collisions. We bind UDP sockets to hold ports for the duration of the scan. */
+            int scan_mask[SCAN_COUNT] = { SCAN_SYN, SCAN_NULL, SCAN_ACK, SCAN_FIN, SCAN_XMAS, SCAN_UDP };
+            int total_probes = 0;
+            for (int i = 0; i < args->port_count; i++)
+            {
+                for (int s = 0; s < SCAN_COUNT; s++)
+                    if (args->scan_type & scan_mask[s]) total_probes++;
+            }
+
+            /* allocate map from probe (map_v) to src_port */
+            args->map_to_srcport = malloc(sizeof(int) * args->port_count * SCAN_COUNT);
+            if (!args->map_to_srcport) args->map_to_srcport = NULL;
+            else
+            {
+                for (int i = 0; i < args->port_count * SCAN_COUNT; i++) args->map_to_srcport[i] = -1;
+            }
+
+            args->reserved_socks = malloc(sizeof(int) * (total_probes > 0 ? total_probes : 1));
+            args->reserved_count = 0;
+
+            /* seed PRNG for per-run randomness */
+            srand((unsigned int)(time(NULL) ^ getpid()));
+
+            for (int i = 0; i < args->port_count; i++)
+            {
+                for (int sidx = 0; sidx < SCAN_COUNT; sidx++)
+                {
+                    if (!(args->scan_type & scan_mask[sidx])) continue;
+                    int map_v = i * SCAN_COUNT + sidx;
+
+                    int attempts = 0;
+                    int chosen_port = -1;
+                    int sockfd = -1;
+                    while (attempts < 5000)
+                    {
+                        int r = rand() % SRC_PORT_RANGE;
+                        int cand = SRC_PORT_BASE + r;
+                        pthread_mutex_lock(&args->map_mutex);
+                        int used = args->srcport_map[cand];
+                        pthread_mutex_unlock(&args->map_mutex);
+                        if (used != -1) { attempts++; continue; }
+
+                        /* Try to bind a UDP socket to reserve the port */
+                        sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sockfd < 0) { attempts++; continue; }
+                        struct sockaddr_in bind_addr;
+                        memset(&bind_addr, 0, sizeof(bind_addr));
+                        bind_addr.sin_family = AF_INET;
+                        bind_addr.sin_port = htons(cand);
+                        bind_addr.sin_addr.s_addr = INADDR_ANY;
+                        if (bind(sockfd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
+                        {
+                            chosen_port = cand;
+                            break;
+                        }
+                        close(sockfd);
+                        sockfd = -1;
+                        attempts++;
+                    }
+
+                    if (chosen_port == -1)
+                    {
+                        /* fallback deterministic choice (no bind) */
+                        chosen_port = SRC_PORT_BASE + (map_v % SRC_PORT_RANGE);
+                        sockfd = -1;
+                    }
+
+                    /* record mapping */
+                    if (args->map_to_srcport)
+                        args->map_to_srcport[map_v] = chosen_port;
+                    pthread_mutex_lock(&args->map_mutex);
+                    args->srcport_map[chosen_port] = map_v;
+                    pthread_mutex_unlock(&args->map_mutex);
+
+                    /* store reserved socket (fd or -1) so we can close later */
+                    args->reserved_socks[args->reserved_count++] = sockfd;
+                }
+            }
+
+            /* Build precise pcap filter listing chosen dst ports (our probe source ports) */
+            size_t filter_sz = 256 + (args->reserved_count * 16);
+            char *filter_exp = malloc(filter_sz);
+            if (filter_exp)
+            {
+                snprintf(filter_exp, filter_sz, "(tcp or udp or icmp) and src host %s and (", args->ip);
+                int first = 1;
+                /* iterate over map_to_srcport to list ports */
+                for (int mv = 0; mv < args->port_count * SCAN_COUNT; mv++)
+                {
+                    if (!args->map_to_srcport) break;
+                    int port = args->map_to_srcport[mv];
+                    if (port <= 0) continue;
+                    if (!first) strncat(filter_exp, " or ", filter_sz - strlen(filter_exp) - 1);
+                    char tmp[32];
+                    snprintf(tmp, sizeof(tmp), "dst port %d", port);
+                    strncat(filter_exp, tmp, filter_sz - strlen(filter_exp) - 1);
+                    first = 0;
+                }
+                strncat(filter_exp, ")", filter_sz - strlen(filter_exp) - 1);
+
+                struct bpf_program fp;
+                if (pcap_compile(args->pcap_handle, &fp, filter_exp, 1, PCAP_NETMASK_UNKNOWN) == 0)
+                {
+                    if (pcap_setfilter(args->pcap_handle, &fp) != 0)
+                        fprintf(stderr, "Warning: failed to set precise pcap filter\n");
+                    pcap_freecode(&fp);
+                }
+                free(filter_exp);
+            }
+
+            /* Create sender threads that will send the requested probes */
             for (int i = 0; i < thread_count; i++)
             {
                 if (pthread_create(&threads_pool[i], NULL, scan_sender_worker, args) != 0)
@@ -335,6 +434,24 @@ void start_scan(t_nmap_args *args)
                     args->results[idx].scan_results[sidx] = STATUS_FILTERED;
                     args->srcport_map[p] = -1;
                 }
+            }
+
+            /* Close any reserved sockets used to hold source ports and free mapping */
+            if (args->reserved_socks)
+            {
+                for (int i = 0; i < args->reserved_count; i++)
+                {
+                    int fd = args->reserved_socks[i];
+                    if (fd >= 0) close(fd);
+                }
+                free(args->reserved_socks);
+                args->reserved_socks = NULL;
+                args->reserved_count = 0;
+            }
+            if (args->map_to_srcport)
+            {
+                free(args->map_to_srcport);
+                args->map_to_srcport = NULL;
             }
 
             /* If target is loopback, raw SYN probing on lo may not elicit replies reliably

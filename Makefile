@@ -15,6 +15,28 @@ all: $(NAME)
 $(NAME): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $(NAME) $(LIBS)
 
+.PHONY: test-args
+test-args: $(NAME)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) src/args.c tests/test_args.c -o bin/test_args
+	@echo "Running args unit test..."
+	./bin/test_args
+
+.PHONY: test
+test: test-args
+	@mkdir -p bin
+	$(CC) $(CFLAGS) src/args.c tests/test_args_negative.c -o bin/test_args_negative
+	@echo "Running all tests..."
+	./bin/test_args; rc1=$$?; \
+	./bin/test_args_negative; rc2=$$?; \
+	TOTAL=2; \
+	FAILED=0; \
+	if [ $$rc1 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc2 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	PASSED=$$((TOTAL-FAILED)); \
+	echo "Summary: $$PASSED passed, $$FAILED failed out of $$TOTAL"; \
+	if [ $$FAILED -ne 0 ]; then exit 2; fi
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@

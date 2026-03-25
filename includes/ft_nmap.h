@@ -77,10 +77,19 @@ typedef struct s_nmap_args {
     int             pcap_dlt;
     pthread_t       pcap_thread;
     pthread_mutex_t map_mutex;
+    /* Reservation helpers: keep sockets open to reserve source ports and mapping from probe to src port */
+    int             *reserved_socks; /* fds of bound UDP sockets to hold ports */
+    int             reserved_count;
+    int             *map_to_srcport; /* maps composite map_v -> src_port */
 } t_nmap_args;
 
 /* Function Prototypes */
-void    parse_args(int argc, char **argv, t_nmap_args *args);
+/* parse_args return codes: 0 = ok, 1 = error, 2 = help (printed) */
+#define PARSE_OK 0
+#define PARSE_ERR 1
+#define PARSE_HELP 2
+
+int     parse_args(int argc, char **argv, t_nmap_args *args);
 void    parse_ports(t_nmap_args *args);
 void    resolve_target(t_nmap_args *args);
 void    start_scan(t_nmap_args *args);

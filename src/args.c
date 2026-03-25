@@ -38,16 +38,17 @@ void    print_config(t_nmap_args *args)
 
 int     match_scan_type(char *str)
 {
-    if (strcmp(str, "SYN") == 0) return SCAN_SYN;
-    if (strcmp(str, "NULL") == 0) return SCAN_NULL;
-    if (strcmp(str, "ACK") == 0) return SCAN_ACK;
-    if (strcmp(str, "FIN") == 0) return SCAN_FIN;
-    if (strcmp(str, "XMAS") == 0) return SCAN_XMAS;
-    if (strcmp(str, "UDP") == 0) return SCAN_UDP;
+    /* Case-insensitive matching */
+    if (strcasecmp(str, "SYN") == 0) return SCAN_SYN;
+    if (strcasecmp(str, "NULL") == 0) return SCAN_NULL;
+    if (strcasecmp(str, "ACK") == 0) return SCAN_ACK;
+    if (strcasecmp(str, "FIN") == 0) return SCAN_FIN;
+    if (strcasecmp(str, "XMAS") == 0) return SCAN_XMAS;
+    if (strcasecmp(str, "UDP") == 0) return SCAN_UDP;
     return (0);
 }
 
-void    parse_args(int argc, char **argv, t_nmap_args *args)
+int     parse_args(int argc, char **argv, t_nmap_args *args)
 {
     int i = 1;
 
@@ -65,7 +66,7 @@ void    parse_args(int argc, char **argv, t_nmap_args *args)
         if (strcmp(argv[i], "--help") == 0)
         {
             print_help();
-            exit(0);
+            return PARSE_HELP;
         }
         else if (strcmp(argv[i], "--ip") == 0)
         {
@@ -116,13 +117,37 @@ void    parse_args(int argc, char **argv, t_nmap_args *args)
             // Check following args until next flag or end
             while (i < argc && argv[i][0] != '-')
             {
-                int type = match_scan_type(argv[i]);
-                if (type == 0)
+                /* Support comma-separated values like "SYN,UDP" and space-separated tokens */
+                char *s = argv[i];
+                if (strchr(s, ','))
                 {
-                    fprintf(stderr, "Error: Unknown scan type '%s'\n", argv[i]);
-                    exit(1);
+                    char *tmp = strdup(s);
+                    char *saveptr = NULL;
+                    char *tok = strtok_r(tmp, ",", &saveptr);
+                    while (tok)
+                    {
+                        int type = match_scan_type(tok);
+                        if (type == 0)
+                        {
+                            fprintf(stderr, "Error: Unknown scan type '%s'\n", tok);
+                            free(tmp);
+                            return PARSE_ERR;
+                        }
+                        args->scan_type |= type;
+                        tok = strtok_r(NULL, ",", &saveptr);
+                    }
+                    free(tmp);
                 }
-                args->scan_type |= type;
+                else
+                {
+                    int type = match_scan_type(s);
+                    if (type == 0)
+                    {
+                        fprintf(stderr, "Error: Unknown scan type '%s'\n", s);
+                        return PARSE_ERR;
+                    }
+                    args->scan_type |= type;
+                }
                 i++;
             }
             i--; // Decrement because outer loop increments
@@ -144,17 +169,19 @@ void    parse_args(int argc, char **argv, t_nmap_args *args)
     else if (args->scan_type == 0)
     {
         fprintf(stderr, "Error: --scan requires at least one scan type argument\n");
-        exit(1);
+        return PARSE_ERR;
     }
 
     if (args->ip == NULL && args->file == NULL)
     {
         fprintf(stderr, "Error: Must specify --ip or --file\n");
-        exit(1);
+        return PARSE_ERR;
     }
     if (args->ip && args->file)
     {
         fprintf(stderr, "Error: Cannot specify both --ip and --file\n");
-        exit(1);
+        return PARSE_ERR;
     }
+
+    return PARSE_OK;
 }

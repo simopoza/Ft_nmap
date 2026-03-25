@@ -11,7 +11,11 @@ int main(int argc, char **argv)
         print_help();
         return (1);
     }
-    parse_args(argc, argv, &args);
+    int rc = parse_args(argc, argv, &args);
+    if (rc == PARSE_HELP)
+        return 0;
+    if (rc != PARSE_OK)
+        return rc;
     resolve_target(&args);
     parse_ports(&args);
     print_config(&args);
