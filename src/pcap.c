@@ -1,6 +1,8 @@
 #include "../includes/ft_nmap.h"
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/udp.h>
 
 // pcap listener thread: receives packets and maps replies to scanned ports
 static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
@@ -46,51 +48,134 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
     }
 
     struct iphdr *iph = (struct iphdr *)ip_ptr;
-    if (iph->protocol != IPPROTO_TCP) return;
 
     int ip_header_len = iph->ihl * 4;
-    if (h->caplen < (size_t)l3_offset + ip_header_len + sizeof(struct tcphdr))
+    if (h->caplen < (size_t)l3_offset + ip_header_len)
         return;
 
-    struct tcphdr *tcph = (struct tcphdr *)(ip_ptr + ip_header_len);
-
-    uint16_t dst_port = ntohs(tcph->dest);
-
-    // Flags
-    uint8_t flags = *((uint8_t *)tcph + 13);
-    int syn = flags & 0x02;
-    int ack = flags & 0x10;
-    int rst = flags & 0x04;
-
-    uint16_t our_src = dst_port; // packet dest is our source port
-    (void)iph; (void)tcph; /* no-op to avoid unused warnings if debug removed */
-
-    pthread_mutex_lock(&args->map_mutex);
-    int map_v = args->srcport_map[our_src];
-    if (map_v != -1)
+    /* Handle TCP replies */
+    if (iph->protocol == IPPROTO_TCP)
     {
-        int idx = map_v / SCAN_COUNT;
-        int sidx = map_v % SCAN_COUNT;
-        if (sidx == SCAN_IDX_SYN)
-        {
-            if (syn && ack)
-                args->results[idx].scan_results[sidx] = STATUS_OPEN;
-            else if (rst)
-                args->results[idx].scan_results[sidx] = STATUS_CLOSED;
-        }
-        else
-        {
-            /* For other scan types, a RST usually means closed, absence means filtered; for NULL/FIN we'll treat RST as closed and SYN-ACK as improbable */
-            if (rst)
-                args->results[idx].scan_results[sidx] = STATUS_CLOSED;
-            else
-                args->results[idx].scan_results[sidx] = STATUS_OPEN; /* best-effort for non-SYN scans */
-        }
+        if (h->caplen < (size_t)l3_offset + ip_header_len + sizeof(struct tcphdr))
+            return;
+        struct tcphdr *tcph = (struct tcphdr *)(ip_ptr + ip_header_len);
+        uint16_t dst_port = ntohs(tcph->dest);
+        uint8_t flags = *((uint8_t *)tcph + 13);
+        int syn = flags & 0x02;
+        int ack = flags & 0x10;
+        int rst = flags & 0x04;
+        uint16_t our_src = dst_port; // packet dest is our source port
 
-        /* consume mapping */
-        args->srcport_map[our_src] = -1;
+        pthread_mutex_lock(&args->map_mutex);
+        int map_v = args->srcport_map[our_src];
+        if (map_v != -1)
+        {
+            int idx = map_v / SCAN_COUNT;
+            int sidx = map_v % SCAN_COUNT;
+            if (sidx == SCAN_IDX_SYN)
+            {
+                if (syn && ack)
+                    args->results[idx].scan_results[sidx] = STATUS_OPEN;
+                else if (rst)
+                    args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+            }
+            else if (sidx == SCAN_IDX_ACK)
+            {
+                if (rst)
+                    args->results[idx].scan_results[sidx] = STATUS_UNFILTERED; // RST indicates unfiltered
+                else
+                    args->results[idx].scan_results[sidx] = STATUS_FILTERED;
+            }
+            else
+            {
+                if (rst)
+                    args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                else
+                    args->results[idx].scan_results[sidx] = STATUS_OPEN; /* active reply -> likely open */
+            }
+
+            args->srcport_map[our_src] = -1;
+        }
+        pthread_mutex_unlock(&args->map_mutex);
+        return;
     }
-    pthread_mutex_unlock(&args->map_mutex);
+
+    /* Handle UDP replies (direct UDP response) */
+    if (iph->protocol == IPPROTO_UDP)
+    {
+        if (h->caplen < (size_t)l3_offset + ip_header_len + sizeof(struct udphdr))
+            return;
+        struct udphdr *udph = (struct udphdr *)(ip_ptr + ip_header_len);
+        uint16_t our_src = ntohs(udph->dest);
+        pthread_mutex_lock(&args->map_mutex);
+        int map_v = args->srcport_map[our_src];
+        if (map_v != -1)
+        {
+            int idx = map_v / SCAN_COUNT;
+            int sidx = map_v % SCAN_COUNT;
+            if (sidx == SCAN_IDX_UDP)
+            {
+                args->results[idx].scan_results[sidx] = STATUS_OPEN; // UDP reply -> open
+            }
+            else
+            {
+                args->results[idx].scan_results[sidx] = STATUS_OPEN;
+            }
+            args->srcport_map[our_src] = -1;
+        }
+        pthread_mutex_unlock(&args->map_mutex);
+        return;
+    }
+
+    /* Handle ICMP (e.g., port unreachable) */
+    if (iph->protocol == IPPROTO_ICMP)
+    {
+        if (h->caplen < (size_t)l3_offset + ip_header_len + sizeof(struct icmphdr))
+            return;
+        struct icmphdr *icmph = (struct icmphdr *)(ip_ptr + ip_header_len);
+        if (icmph->type == 3) /* Destination Unreachable */
+        {
+            const u_char *inner = ip_ptr + ip_header_len + sizeof(struct icmphdr);
+            if ((size_t)(inner - bytes) + sizeof(struct iphdr) > h->caplen) return;
+            struct iphdr *inner_iph = (struct iphdr *)inner;
+            int inner_ihl = inner_iph->ihl * 4;
+            if ((size_t)(inner - bytes) + inner_ihl + 4 > h->caplen) return;
+
+            if (inner_iph->protocol == IPPROTO_UDP)
+            {
+                struct udphdr *inner_udph = (struct udphdr *)((u_char *)inner + inner_ihl);
+                uint16_t our_src = ntohs(inner_udph->source);
+                pthread_mutex_lock(&args->map_mutex);
+                int map_v = args->srcport_map[our_src];
+                if (map_v != -1)
+                {
+                    int idx = map_v / SCAN_COUNT;
+                    int sidx = map_v % SCAN_COUNT;
+                    if (sidx == SCAN_IDX_UDP)
+                        args->results[idx].scan_results[sidx] = STATUS_CLOSED; // ICMP port unreachable -> closed
+                    else
+                        args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                    args->srcport_map[our_src] = -1;
+                }
+                pthread_mutex_unlock(&args->map_mutex);
+            }
+            else if (inner_iph->protocol == IPPROTO_TCP)
+            {
+                struct tcphdr *inner_tcph = (struct tcphdr *)((u_char *)inner + inner_ihl);
+                uint16_t our_src = ntohs(inner_tcph->source);
+                pthread_mutex_lock(&args->map_mutex);
+                int map_v = args->srcport_map[our_src];
+                if (map_v != -1)
+                {
+                    int idx = map_v / SCAN_COUNT;
+                    int sidx = map_v % SCAN_COUNT;
+                    args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                    args->srcport_map[our_src] = -1;
+                }
+                pthread_mutex_unlock(&args->map_mutex);
+            }
+        }
+    }
 }
 
 void *pcap_listener_thread(void *arg)
@@ -114,10 +199,10 @@ void *pcap_listener_thread(void *arg)
     /* Record datalink type so packet handler can compute offsets */
     args->pcap_dlt = pcap_datalink(args->pcap_handle);
 
-    // Build filter: TCP packets from target IP
+    // Build filter: capture TCP, UDP, ICMP packets from target IP
     struct bpf_program fp;
     char filter_exp[256];
-    snprintf(filter_exp, sizeof(filter_exp), "tcp and src host %s", args->ip);
+    snprintf(filter_exp, sizeof(filter_exp), "(tcp or udp or icmp) and src host %s", args->ip);
     if (pcap_compile(args->pcap_handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1)
     {
         fprintf(stderr, "pcap_compile failed\n");

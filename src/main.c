@@ -56,7 +56,13 @@ int main(int argc, char **argv)
         for (int a = 0; a < active_count; a++)
         {
             uint8_t st = r->scan_results[active_idxs[a]];
-            const char *st_str = (st == STATUS_OPEN) ? "open" : (st == STATUS_CLOSED) ? "closed" : (st == STATUS_FILTERED) ? "filtered" : "-";
+            const char *st_str;
+            if (st == STATUS_OPEN) st_str = "open";
+            else if (st == STATUS_CLOSED) st_str = "closed";
+            else if (st == STATUS_FILTERED) st_str = "filtered";
+            else if (st == STATUS_UNFILTERED) st_str = "unfiltered";
+            else if (st == STATUS_OPEN_FILTERED) st_str = "open|filtered";
+            else st_str = "-";
             if (st == STATUS_OPEN) cnt_open[active_idxs[a]]++;
             else if (st == STATUS_CLOSED) cnt_closed[active_idxs[a]]++;
             else if (st == STATUS_FILTERED) cnt_filtered[active_idxs[a]]++;

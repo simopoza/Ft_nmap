@@ -42,6 +42,9 @@
 #define STATUS_CLOSED 0
 #define STATUS_OPEN 1
 #define STATUS_FILTERED 2
+/* Additional states */
+#define STATUS_UNFILTERED 3
+#define STATUS_OPEN_FILTERED 4
 
 typedef struct s_result {
     uint16_t    port;
@@ -83,6 +86,7 @@ void    print_config(t_nmap_args *args);
 /* Packet/pcap helpers */
 int     send_syn_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port);
 int     send_tcp_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port, uint8_t flags);
+int     send_udp_probe(const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port);
 void    *pcap_listener_thread(void *arg);
 
 #endif

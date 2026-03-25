@@ -162,7 +162,7 @@ static void *scan_sender_worker(void *arg)
             args->srcport_map[src_port] = map_v;
             pthread_mutex_unlock(&args->map_mutex);
 
-            // Determine flags for this scan
+            // Determine flags for this scan and send
             uint8_t flags = 0;
             if (sidx == SCAN_IDX_SYN) flags = 0x02;
             else if (sidx == SCAN_IDX_NULL) flags = 0x00;
@@ -170,8 +170,18 @@ static void *scan_sender_worker(void *arg)
             else if (sidx == SCAN_IDX_XMAS) flags = 0x01 | 0x08 | 0x20; // FIN+PSH+URG
             else if (sidx == SCAN_IDX_ACK) flags = 0x10;
 
-            // Send packet
-            if (send_tcp_packet(args->raw_sock, args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port, flags) < 0)
+            int send_ret = -1;
+            if (sidx == SCAN_IDX_UDP)
+            {
+                send_ret = send_udp_probe(args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port);
+            }
+            else
+            {
+                send_ret = send_tcp_packet(args->raw_sock, args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port, flags);
+            }
+
+            // Send result handling
+            if (send_ret < 0)
             {
                 args->results[index].scan_results[sidx] = STATUS_CLOSED;
                 pthread_mutex_lock(&args->map_mutex);
@@ -180,8 +190,13 @@ static void *scan_sender_worker(void *arg)
             }
             else
             {
-                /* default to filtered until reply */
-                args->results[index].scan_results[sidx] = STATUS_FILTERED;
+                /* default states: SYN -> FILTERED; NULL/FIN/XMAS -> OPEN|FILTERED; ACK -> FILTERED; UDP -> OPEN|FILTERED */
+                if (sidx == SCAN_IDX_SYN || sidx == SCAN_IDX_ACK)
+                    args->results[index].scan_results[sidx] = STATUS_FILTERED;
+                else if (sidx == SCAN_IDX_UDP)
+                    args->results[index].scan_results[sidx] = STATUS_OPEN_FILTERED;
+                else
+                    args->results[index].scan_results[sidx] = STATUS_OPEN_FILTERED;
             }
 
             // small delay between probes for same port

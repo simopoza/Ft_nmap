@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <netinet/udp.h>
+#include <sys/socket.h>
+#include <stdio.h>
 
 // Helpers for checksum
 static uint16_t checksum(void *vdata, size_t length)
@@ -112,5 +115,34 @@ int send_tcp_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16
                           (struct sockaddr *)&sin, sizeof(sin));
     if (sent < 0)
         return -1;
+    return 0;
+}
+
+int send_udp_probe(const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port)
+{
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return -1;
+
+    struct sockaddr_in local, dest;
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_port = htons(src_port);
+    local.sin_addr.s_addr = inet_addr(src_ip);
+
+    if (bind(sock, (struct sockaddr *)&local, sizeof(local)) < 0)
+    {
+        close(sock);
+        return -1;
+    }
+
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(dst_port);
+    dest.sin_addr.s_addr = inet_addr(dst_ip);
+
+    // send an empty datagram
+    ssize_t s = sendto(sock, "", 0, 0, (struct sockaddr *)&dest, sizeof(dest));
+    close(sock);
+    if (s < 0) return -1;
     return 0;
 }
