@@ -114,12 +114,15 @@ static char *get_local_ip_for_dest(const char *dst_ip)
     return ip;
 }
 
-// SYN sender worker
-static void *scan_syn_send_worker(void *arg)
+// General sender worker: sends TCP probes for requested scan types (SYN/NULL/FIN/...)
+static void *scan_sender_worker(void *arg)
 {
     t_nmap_args *args = (t_nmap_args *)arg;
     int index;
     uint16_t dst_port;
+
+    // Which masks correspond to each scan index
+    int scan_mask[SCAN_COUNT] = { SCAN_SYN, SCAN_NULL, SCAN_ACK, SCAN_FIN, SCAN_XMAS, SCAN_UDP };
 
     // Compute local IP once
     if (!args->local_ip)
@@ -138,32 +141,54 @@ static void *scan_syn_send_worker(void *arg)
         dst_port = args->port_list[index];
         pthread_mutex_unlock(&args->mutex_port);
 
-        // Choose a source port deterministically (base + index)
-        uint16_t src_port = 40000 + (index % 20000);
+        args->results[index].port = dst_port;
 
-        // Register mapping
-        pthread_mutex_lock(&args->map_mutex);
-        args->srcport_map[src_port] = index;
-        pthread_mutex_unlock(&args->map_mutex);
-
-        // Send SYN
-        if (send_syn_packet(args->raw_sock, args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port) < 0)
+        // For each requested scan type, send appropriate TCP/UDP probe
+        for (int sidx = 0; sidx < SCAN_COUNT; sidx++)
         {
-            // sending failed; mark closed and continue
-            args->results[index].scan_results[SCAN_IDX_SYN] = STATUS_CLOSED;
-            args->results[index].port = dst_port;
+            if (!(args->scan_type & scan_mask[sidx]))
+                continue;
+
+            // Skip UDP here (not yet implemented)
+            if (sidx == SCAN_IDX_UDP)
+                continue;
+
+            // Build a source port unique per (index, sidx)
+            uint16_t src_port = 40000 + ((index * SCAN_COUNT + sidx) % 20000);
+
+            // Register composite mapping: index * SCAN_COUNT + sidx
+            int map_v = index * SCAN_COUNT + sidx;
             pthread_mutex_lock(&args->map_mutex);
-            args->srcport_map[src_port] = -1;
+            args->srcport_map[src_port] = map_v;
             pthread_mutex_unlock(&args->map_mutex);
-        }
-        else
-        {
-            args->results[index].port = dst_port;
-            /* leave status unset until pcap tells us */
-            args->results[index].scan_results[SCAN_IDX_SYN] = STATUS_FILTERED; /* default to filtered until reply */
+
+            // Determine flags for this scan
+            uint8_t flags = 0;
+            if (sidx == SCAN_IDX_SYN) flags = 0x02;
+            else if (sidx == SCAN_IDX_NULL) flags = 0x00;
+            else if (sidx == SCAN_IDX_FIN) flags = 0x01;
+            else if (sidx == SCAN_IDX_XMAS) flags = 0x01 | 0x08 | 0x20; // FIN+PSH+URG
+            else if (sidx == SCAN_IDX_ACK) flags = 0x10;
+
+            // Send packet
+            if (send_tcp_packet(args->raw_sock, args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port, flags) < 0)
+            {
+                args->results[index].scan_results[sidx] = STATUS_CLOSED;
+                pthread_mutex_lock(&args->map_mutex);
+                args->srcport_map[src_port] = -1;
+                pthread_mutex_unlock(&args->map_mutex);
+            }
+            else
+            {
+                /* default to filtered until reply */
+                args->results[index].scan_results[sidx] = STATUS_FILTERED;
+            }
+
+            // small delay between probes for same port
+            usleep(500);
         }
 
-        // small delay to avoid flooding
+        // small delay to avoid flooding between ports
         usleep(1000);
     }
     return NULL;
@@ -203,8 +228,8 @@ void start_scan(t_nmap_args *args)
 
     printf("\nScanning...\n");
 
-    // If SYN scan requested, delegate to SYN-specific routine
-    if (args->scan_type & SCAN_SYN)
+    // If any raw/pcap-based scans requested, prepare raw socket + pcap and sender threads
+    if (args->scan_type & (SCAN_SYN | SCAN_NULL | SCAN_ACK | SCAN_FIN | SCAN_XMAS | SCAN_UDP))
     {
         // Prepare source-port mapping
         args->srcport_map = malloc(sizeof(int) * 65536);
@@ -240,11 +265,11 @@ void start_scan(t_nmap_args *args)
             if (args->pcap_handle == NULL)
                 fprintf(stderr, "Warning: pcap handle not ready, proceeding without capture readiness\n");
 
-            // Create sender threads that will send SYNs
+            // Create sender threads that will send the requested probes
             for (int i = 0; i < thread_count; i++)
             {
-                if (pthread_create(&threads_pool[i], NULL, scan_syn_send_worker, args) != 0)
-                    perror("pthread_create syn sender");
+                if (pthread_create(&threads_pool[i], NULL, scan_sender_worker, args) != 0)
+                    perror("pthread_create sender");
             }
 
             // Wait for sender threads
@@ -261,13 +286,15 @@ void start_scan(t_nmap_args *args)
             // Join pcap thread
             pthread_join(args->pcap_thread, NULL);
 
-            // Mark remaining unanswered probes as filtered
+            // Mark remaining unanswered probes as filtered (decode composite map)
             for (int p = 0; p < 65536; p++)
             {
-                int idx = args->srcport_map[p];
-                if (idx != -1)
+                int map_v = args->srcport_map[p];
+                if (map_v != -1)
                 {
-                    args->results[idx].scan_results[SCAN_IDX_SYN] = STATUS_FILTERED;
+                    int idx = map_v / SCAN_COUNT;
+                    int sidx = map_v % SCAN_COUNT;
+                    args->results[idx].scan_results[sidx] = STATUS_FILTERED;
                     args->srcport_map[p] = -1;
                 }
             }
@@ -276,15 +303,23 @@ void start_scan(t_nmap_args *args)
                from the kernel. Fall back to a connect() check for accurate local detection. */
             if (strncmp(args->ip, "127.", 4) == 0 || strcmp(args->ip, "localhost") == 0)
             {
+                int scan_mask[SCAN_COUNT] = { SCAN_SYN, SCAN_NULL, SCAN_ACK, SCAN_FIN, SCAN_XMAS, SCAN_UDP };
                 for (int i = 0; i < args->port_count; i++)
                 {
-                    if (args->results[i].scan_results[SCAN_IDX_SYN] == STATUS_OPEN)
-                        continue;
                     uint16_t p = args->port_list[i];
-                    if (is_open_connect(args, p))
-                        args->results[i].scan_results[SCAN_IDX_SYN] = STATUS_OPEN;
-                    else if (args->results[i].scan_results[SCAN_IDX_SYN] != STATUS_OPEN)
-                        args->results[i].scan_results[SCAN_IDX_SYN] = STATUS_CLOSED;
+                    for (int sidx = 0; sidx < SCAN_COUNT; sidx++)
+                    {
+                        if (!(args->scan_type & scan_mask[sidx]))
+                            continue;
+                        if (sidx == SCAN_IDX_UDP)
+                            continue;
+                        if (args->results[i].scan_results[sidx] == STATUS_OPEN)
+                            continue;
+                        if (is_open_connect(args, p))
+                            args->results[i].scan_results[sidx] = STATUS_OPEN;
+                        else if (args->results[i].scan_results[sidx] != STATUS_OPEN)
+                            args->results[i].scan_results[sidx] = STATUS_CLOSED;
+                    }
                 }
             }
 

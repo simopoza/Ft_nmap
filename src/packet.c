@@ -59,6 +59,11 @@ static uint16_t tcp_checksum(struct iphdr *iph, struct tcphdr *tcph, const uint8
 
 int send_syn_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port)
 {
+    return send_tcp_packet(raw_sock, src_ip, dst_ip, src_port, dst_port, 0x02);
+}
+
+int send_tcp_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port, uint8_t flags)
+{
     // Build IP + TCP headers in a buffer
     uint8_t packet[4096];
     memset(packet, 0, sizeof(packet));
@@ -85,7 +90,11 @@ int send_syn_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16
     tcph->dest = htons(dst_port);
     tcph->seq = htonl(0x1000 + dst_port); // pseudo-random seq
     tcph->doff = 5;
-    tcph->syn = 1;
+    tcph->syn = (flags & 0x02) ? 1 : 0;
+    tcph->fin = (flags & 0x01) ? 1 : 0;
+    tcph->psh = (flags & 0x08) ? 1 : 0;
+    tcph->urg = (flags & 0x20) ? 1 : 0;
+    tcph->ack = (flags & 0x10) ? 1 : 0;
     tcph->window = htons(64240);
     tcph->check = 0;
 

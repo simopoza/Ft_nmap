@@ -82,6 +82,7 @@ void    print_config(t_nmap_args *args);
 
 /* Packet/pcap helpers */
 int     send_syn_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port);
+int     send_tcp_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port, uint8_t flags);
 void    *pcap_listener_thread(void *arg);
 
 #endif

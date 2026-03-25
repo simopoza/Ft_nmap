@@ -66,17 +66,27 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
     (void)iph; (void)tcph; /* no-op to avoid unused warnings if debug removed */
 
     pthread_mutex_lock(&args->map_mutex);
-    int idx = args->srcport_map[our_src];
-    if (idx != -1)
+    int map_v = args->srcport_map[our_src];
+    if (map_v != -1)
     {
-        if (syn && ack)
+        int idx = map_v / SCAN_COUNT;
+        int sidx = map_v % SCAN_COUNT;
+        if (sidx == SCAN_IDX_SYN)
         {
-            args->results[idx].scan_results[SCAN_IDX_SYN] = STATUS_OPEN;
+            if (syn && ack)
+                args->results[idx].scan_results[sidx] = STATUS_OPEN;
+            else if (rst)
+                args->results[idx].scan_results[sidx] = STATUS_CLOSED;
         }
-        else if (rst)
+        else
         {
-            args->results[idx].scan_results[SCAN_IDX_SYN] = STATUS_CLOSED;
+            /* For other scan types, a RST usually means closed, absence means filtered; for NULL/FIN we'll treat RST as closed and SYN-ACK as improbable */
+            if (rst)
+                args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+            else
+                args->results[idx].scan_results[sidx] = STATUS_OPEN; /* best-effort for non-SYN scans */
         }
+
         /* consume mapping */
         args->srcport_map[our_src] = -1;
     }
