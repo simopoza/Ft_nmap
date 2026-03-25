@@ -202,7 +202,8 @@ void *pcap_listener_thread(void *arg)
     // Build filter: capture TCP, UDP, ICMP packets from target IP
     struct bpf_program fp;
     char filter_exp[256];
-    snprintf(filter_exp, sizeof(filter_exp), "(tcp or udp or icmp) and src host %s", args->ip);
+    snprintf(filter_exp, sizeof(filter_exp), "(tcp or udp or icmp) and src host %s and dst portrange %d-%d",
+             args->ip, SRC_PORT_BASE, SRC_PORT_BASE + SRC_PORT_RANGE - 1);
     if (pcap_compile(args->pcap_handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1)
     {
         fprintf(stderr, "pcap_compile failed\n");

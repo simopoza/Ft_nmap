@@ -46,6 +46,10 @@
 #define STATUS_UNFILTERED 3
 #define STATUS_OPEN_FILTERED 4
 
+/* Source port allocation for probes: range used for ephemeral source ports we control */
+#define SRC_PORT_BASE 40000
+#define SRC_PORT_RANGE 20000
+
 typedef struct s_result {
     uint16_t    port;
     char        *service;

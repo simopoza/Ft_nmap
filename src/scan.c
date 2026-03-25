@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <time.h>
 #include <sys/time.h>
 #include <netdb.h>
 
@@ -128,6 +129,9 @@ static void *scan_sender_worker(void *arg)
     if (!args->local_ip)
         args->local_ip = get_local_ip_for_dest(args->ip);
 
+    /* seed rand for source port selection (use pid to vary between runs) */
+    srand((unsigned int)(time(NULL) ^ getpid()));
+
     while (1)
     {
         pthread_mutex_lock(&args->mutex_port);
@@ -153,14 +157,33 @@ static void *scan_sender_worker(void *arg)
             if (sidx == SCAN_IDX_UDP)
                 continue;
 
-            // Build a source port unique per (index, sidx)
-            uint16_t src_port = 40000 + ((index * SCAN_COUNT + sidx) % 20000);
-
-            // Register composite mapping: index * SCAN_COUNT + sidx
-            int map_v = index * SCAN_COUNT + sidx;
-            pthread_mutex_lock(&args->map_mutex);
-            args->srcport_map[src_port] = map_v;
-            pthread_mutex_unlock(&args->map_mutex);
+            // Allocate a random source port within our reserved range and reserve it
+            uint16_t src_port = 0;
+            int attempts = 0;
+            while (1)
+            {
+                int r = rand() % SRC_PORT_RANGE; /* 0..SRC_PORT_RANGE-1 */
+                src_port = (uint16_t)(SRC_PORT_BASE + r);
+                pthread_mutex_lock(&args->map_mutex);
+                if (args->srcport_map[src_port] == -1)
+                {
+                    int map_v = index * SCAN_COUNT + sidx;
+                    args->srcport_map[src_port] = map_v;
+                    pthread_mutex_unlock(&args->map_mutex);
+                    break;
+                }
+                pthread_mutex_unlock(&args->map_mutex);
+                attempts++;
+                if (attempts > 1000)
+                {
+                    /* fallback deterministic allocation */
+                    src_port = (uint16_t)(SRC_PORT_BASE + ((index * SCAN_COUNT + sidx) % SRC_PORT_RANGE));
+                    pthread_mutex_lock(&args->map_mutex);
+                    args->srcport_map[src_port] = index * SCAN_COUNT + sidx;
+                    pthread_mutex_unlock(&args->map_mutex);
+                    break;
+                }
+            }
 
             // Determine flags for this scan and send
             uint8_t flags = 0;
