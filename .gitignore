@@ -4,6 +4,9 @@ obj/
 # Binary
 ft_nmap
 
+# Local test binaries
+bin/
+
 # Project files not to keep in git
 ft_nmap-correction-page.pdf
 project-overview.md
