@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include <pcap/pcap.h>
 #include <sys/resource.h>
+#include <fcntl.h>
 
 // Simple connect scan function (Step 4)
 static bool is_open_connect(t_nmap_args *args, uint16_t port)
@@ -20,13 +21,6 @@ static bool is_open_connect(t_nmap_args *args, uint16_t port)
     // Create socket
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         return false;
-
-    // Timeout logic
-    struct timeval timeout;
-    timeout.tv_sec = 2; // 2 seconds timeout
-    timeout.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
 
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
@@ -39,14 +33,46 @@ static bool is_open_connect(t_nmap_args *args, uint16_t port)
         return false;
     }
 
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    // Use non-blocking connect with a short timeout to keep scans fast (500ms)
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+
+    int res = connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
+    if (res == 0)
+    {
+        close(sockfd);
+        return true;
+    }
+    if (errno != EINPROGRESS)
+    {
+        close(sockfd);
+        return false;
+    }
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sockfd, &wfds);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 500000; // 500 ms
+
+    res = select(sockfd + 1, NULL, &wfds, NULL, &tv);
+    if (res <= 0)
+    {
+        close(sockfd);
+        return false;
+    }
+
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0)
     {
         close(sockfd);
         return false;
     }
 
     close(sockfd);
-    return true;
+    return (so_error == 0);
 }
 
 static void *scan_worker(void *arg)

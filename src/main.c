@@ -16,7 +16,41 @@ int main(int argc, char **argv)
         return 0;
     if (rc != PARSE_OK)
         return rc;
-    resolve_target(&args);
+    /* If a file of targets was provided, read the first non-empty line as the target
+       (the correction tests use small files; full multi-host support can be added later). */
+    if (args.file)
+    {
+        FILE *f = fopen(args.file, "r");
+        if (!f)
+        {
+            fprintf(stderr, "Error: cannot open file %s\n", args.file);
+            return 1;
+        }
+        char line[256];
+        args.ip = NULL;
+        while (fgets(line, sizeof(line), f))
+        {
+            /* trim newline and spaces */
+            char *s = line;
+            while (*s && isspace((unsigned char)*s)) s++;
+            char *e = s + strlen(s) - 1;
+            while (e >= s && isspace((unsigned char)*e)) { *e = '\0'; e--; }
+            if (*s == '\0') continue;
+            args.ip = strdup(s);
+            break;
+        }
+        fclose(f);
+        if (!args.ip)
+        {
+            fprintf(stderr, "Error: file %s contains no valid targets\n", args.file);
+            return 1;
+        }
+        resolve_target(&args);
+    }
+    else
+    {
+        resolve_target(&args);
+    }
     parse_ports(&args);
 
     /* Print Scan Configurations block (match correction page wording) */

@@ -69,6 +69,10 @@ test-file-input: $(NAME)
 test: test-args test-ports test-resolve test-scan-tcp test-send-udp test-scan-each test-file-input
 	@mkdir -p bin
 	$(CC) $(CFLAGS) src/args.c tests/test_args_negative.c -o bin/test_args_negative
+	$(CC) $(CFLAGS) src/ports.c tests/test_ports_negative_value.c -o bin/test_ports_negative_value
+	$(CC) $(CFLAGS) src/ports.c tests/test_malformed_ports.c -o bin/test_malformed_ports
+	$(CC) $(CFLAGS) tests/test_empty_file_handling.c -o bin/test_empty_file_handling
+	$(CC) $(CFLAGS) tests/test_multiple_targets_file.c -o bin/test_multiple_targets_file
 	@echo "Running all tests..."
 	./bin/test_args; rc1=$$?; \
 	./bin/test_args_negative; rc2=$$?; \
@@ -78,7 +82,11 @@ test: test-args test-ports test-resolve test-scan-tcp test-send-udp test-scan-ea
 	./bin/test_send_udp_probe; rc6=$$?; \
 	./bin/test_scan_each_flag; rc7=$$?; \
 	./bin/test_file_input; rc8=$$?; \
-	TOTAL=8; \
+	./bin/test_ports_negative_value; rc9=$$?; \
+	./bin/test_malformed_ports; rc10=$$?; \
+	./bin/test_empty_file_handling; rc11=$$?; \
+	./bin/test_multiple_targets_file; rc12=$$?; \
+	TOTAL=12; \
 	FAILED=0; \
 	if [ $$rc1 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
 	if [ $$rc2 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
@@ -88,6 +96,10 @@ test: test-args test-ports test-resolve test-scan-tcp test-send-udp test-scan-ea
 	if [ $$rc6 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
 	if [ $$rc7 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
 	if [ $$rc8 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc9 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc10 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc11 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc12 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
 	PASSED=$$((TOTAL-FAILED)); \
 	echo "Summary: $$PASSED passed, $$FAILED failed out of $$TOTAL"; \
 	if [ $$FAILED -ne 0 ]; then exit 2; fi
