@@ -81,6 +81,7 @@ typedef struct s_nmap_args {
     int             *reserved_socks; /* fds of bound UDP sockets to hold ports */
     int             reserved_count;
     int             *map_to_srcport; /* maps composite map_v -> src_port */
+    int             scan_done; /* flag set when scan finished (used by progress indicator) */
 } t_nmap_args;
 
 /* Function Prototypes */

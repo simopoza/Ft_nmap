@@ -18,16 +18,59 @@ int main(int argc, char **argv)
         return rc;
     resolve_target(&args);
     parse_ports(&args);
-    print_config(&args);
 
-    // Initial scan
+    /* Print Scan Configurations block (match correction page wording) */
+    printf("Scan Configurations\n");
+    printf("Target Ip-Address : %s\n", args.ip ? args.ip : "");
+    printf("No of Ports to scan : %d\n", args.port_count);
+    printf("Scans to be performed :");
+    if (args.scan_type & SCAN_SYN) printf(" SYN");
+    if (args.scan_type & SCAN_NULL) printf(" NULL");
+    if (args.scan_type & SCAN_ACK) printf(" ACK");
+    if (args.scan_type & SCAN_FIN) printf(" FIN");
+    if (args.scan_type & SCAN_XMAS) printf(" XMAS");
+    if (args.scan_type & SCAN_UDP) printf(" UDP");
+    printf("\n");
+    printf("No of threads : %d\n", args.threads);
+
+    /* Start scan in a thread so we can display a simple progress indicator (dots) */
+    pthread_t scan_thread;
+    extern void start_scan(t_nmap_args *args);
+    /* wrapper to call start_scan in a pthread */
+    void *start_scan_thread(void *a)
+    {
+        t_nmap_args *aa = (t_nmap_args *)a;
+        start_scan(aa);
+        aa->scan_done = 1;
+        return NULL;
+    }
+
     gettimeofday(&tv_start, NULL);
-    start_scan(&args);
+    printf("\nScanning..\n");
+    fflush(stdout);
+    args.scan_done = 0;
+    if (pthread_create(&scan_thread, NULL, start_scan_thread, &args) != 0)
+    {
+        /* fallback: run synchronously */
+        start_scan(&args);
+    }
+    else
+    {
+        /* print dots until scan thread sets scan_done */
+        while (!args.scan_done)
+        {
+            putchar('.'); fflush(stdout);
+            usleep(200000);
+        }
+        pthread_join(scan_thread, NULL);
+        putchar('\n');
+    }
     gettimeofday(&tv_end, NULL);
     elapsed = (tv_end.tv_sec - tv_start.tv_sec) + (tv_end.tv_usec - tv_start.tv_usec) / 1000000.0;
 
-    // Print summary
-    printf("\nScan completed in %.2f seconds\n", elapsed);
+    /* Print summary matching correction page */
+    printf("\nScan took %.5f secs\n", elapsed);
+    printf("IP address: %s\n", args.ip ? args.ip : "");
 
     /* Determine which scan columns to show based on requested scans */
     int active_idxs[SCAN_COUNT];
@@ -77,21 +120,43 @@ int main(int argc, char **argv)
     }
 
     // Print Open ports table
+    // Print Open ports table (include Conclusion column)
     printf("Open ports:\n");
-    printf("Port  Service Name (if applicable)   Results\n");
-    printf("--------------------------------------------------------------\n");
+    printf("Port Service Name (if applicable) Results Conclusion\n");
+    printf("----------------------------------------------------------------------------------------\n");
     for (int i = 0; i < args.port_count; i++)
     {
         if (!is_open[i]) continue;
         t_result *r = &args.results[i];
         struct servent *s = getservbyport(htons(r->port), "tcp");
-        printf("%-5d %-30s %s\n", r->port, s ? s->s_name : "Unassigned", results_str[i]);
+        
+        // Determine conclusion for this open row
+        const char *concl = "Filtered";
+        int any_unfiltered = 0;
+        int any_openfiltered = 0;
+        int all_closed = 1;
+        for (int a = 0; a < active_count; a++)
+        {
+            uint8_t st = r->scan_results[active_idxs[a]];
+            if (st == STATUS_OPEN) { all_closed = 0; any_unfiltered = 0; concl = "Open"; break; }
+            if (st == STATUS_UNFILTERED) any_unfiltered = 1;
+            if (st == STATUS_OPEN_FILTERED) any_openfiltered = 1;
+            if (st != STATUS_CLOSED) all_closed = 0;
+        }
+        if (strcmp(concl, "Open") != 0)
+        {
+            if (any_unfiltered) concl = "Unfiltered";
+            else if (any_openfiltered) concl = "Open|Filtered";
+            else if (all_closed) concl = "Closed";
+            else concl = "Filtered";
+        }
+        printf("%-4d %-20s %-20s %s\n", r->port, s ? s->s_name : "Unassigned", results_str[i], concl);
     }
 
     // Print Others table
     printf("\nClosed/Filtered/Unfiltered ports:\n");
-    printf("Port  Service Name (if applicable)   Results\t\tConclusion\n");
-    printf("-----------------------------------------------------------------------\n");
+    printf("Port Service Name (if applicable) Results Conclusion\n");
+    printf("----------------------------------------------------------------------------------------\n");
     for (int i = 0; i < args.port_count; i++)
     {
         if (is_open[i]) continue;
@@ -119,7 +184,7 @@ int main(int argc, char **argv)
             else concl = "Filtered";
         }
 
-        printf("%-5d %-30s %s\t%s\n", r->port, s ? s->s_name : "Unassigned", results_str[i], concl);
+        printf("%-4d %-20s %-20s %s\n", r->port, s ? s->s_name : "Unassigned", results_str[i], concl);
     }
 
     // Free temporary storage
