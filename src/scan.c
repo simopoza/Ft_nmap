@@ -75,6 +75,69 @@ static bool is_open_connect(t_nmap_args *args, uint16_t port)
     return (so_error == 0);
 }
 
+/* Attempt to grab a small TCP banner from the given port. Returns malloc'd string or NULL.
+   This performs a short connect (500ms) and then a short recv (200ms) to read any banner. */
+char *grab_banner(t_nmap_args *args, uint16_t port)
+{
+    (void)args;
+    int sockfd;
+    struct sockaddr_in serv_addr;
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) return NULL;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, args->ip, &serv_addr.sin_addr) <= 0)
+    {
+        close(sockfd);
+        return NULL;
+    }
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+    int res = connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
+    if (res < 0 && errno != EINPROGRESS)
+    {
+        close(sockfd);
+        return NULL;
+    }
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sockfd, &wfds);
+    struct timeval tv;
+    tv.tv_sec = 0; tv.tv_usec = 500000; /* 500ms connect timeout */
+    res = select(sockfd + 1, NULL, &wfds, NULL, &tv);
+    if (res <= 0)
+    {
+        close(sockfd);
+        return NULL;
+    }
+    int so_error = 0; socklen_t len = sizeof(so_error);
+    if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0)
+    {
+        close(sockfd);
+        return NULL;
+    }
+    /* Connected — try to read small banner */
+    FD_ZERO(&wfds);
+    FD_SET(sockfd, &wfds);
+    tv.tv_sec = 0; tv.tv_usec = 200000; /* 200ms read */
+    res = select(sockfd + 1, &wfds, NULL, NULL, &tv);
+    char *buf = NULL;
+    if (res > 0)
+    {
+        char tmp[512];
+        ssize_t n = recv(sockfd, tmp, sizeof(tmp)-1, 0);
+        if (n > 0)
+        {
+            tmp[n] = '\0';
+            /* trim newlines */
+            for (ssize_t i = n-1; i >= 0; i--) { if (tmp[i] == '\n' || tmp[i] == '\r') tmp[i] = '\0'; else break; }
+            buf = strdup(tmp);
+        }
+    }
+    close(sockfd);
+    return buf;
+}
+
 static void *scan_worker(void *arg)
 {
     t_nmap_args *args = (t_nmap_args *)arg;
@@ -106,6 +169,12 @@ static void *scan_worker(void *arg)
         {
             printf("Discovered open port %d/tcp\n", port);
             args->results[index].scan_results[SCAN_IDX_SYN] = STATUS_OPEN;
+            /* Attempt banner grab for bonus version detection */
+            char *b = grab_banner(args, port);
+            if (b)
+            {
+                args->results[index].banner = b;
+            }
         }
         else
         {
@@ -157,6 +226,40 @@ static void *scan_sender_worker(void *arg)
     if (!args->local_ip)
         args->local_ip = get_local_ip_for_dest(args->ip);
 
+    /* If decoy_list provided, parse into array (simple comma split). We include local_ip as an option
+       so some probes still come from our real host and can be correlated. */
+    if (args->decoy_list && !args->decoys)
+    {
+        char *c = strdup(args->decoy_list);
+        if (c)
+        {
+            int count = 0;
+            for (char *p = c; *p; p++) if (*p == ',') count++;
+            count += 1;
+            args->decoys = calloc(count + 1, sizeof(char*));
+            if (args->decoys)
+            {
+                int idx = 0;
+                char *tok = strtok(c, ",");
+                while (tok && idx < count)
+                {
+                    while (*tok && isspace((unsigned char)*tok)) tok++;
+                    args->decoys[idx++] = strdup(tok);
+                    tok = strtok(NULL, ",");
+                }
+                /* Add our local IP into the pool if not present */
+                int found_local = 0;
+                for (int i = 0; i < idx; i++) if (args->local_ip && strcmp(args->decoys[i], args->local_ip) == 0) found_local = 1;
+                if (!found_local && args->local_ip)
+                {
+                    args->decoys[idx++] = strdup(args->local_ip);
+                }
+                args->decoy_count = idx;
+            }
+            free(c);
+        }
+    }
+
     /* sender threads use preallocated source ports (map_to_srcport) */
 
     while (1)
@@ -186,18 +289,36 @@ static void *scan_sender_worker(void *arg)
                 ; /* UDP will still have a preallocated src port in map_to_srcport */
             }
 
-            /* Look up preallocated source port for this probe */
+            /* Decide source IP and source port. If decoys configured, randomly choose a decoy
+               IP; only when chosen src_ip == our local_ip we use the reserved src port mapping
+               so replies will be captured and correlated. Decoy sends use ephemeral src ports
+               and are not tracked. */
+            char *chosen_src_ip = args->local_ip ? args->local_ip : "0.0.0.0";
+            if (args->decoy_count > 0)
+            {
+                int ri = rand() % args->decoy_count;
+                if (args->decoys[ri]) chosen_src_ip = args->decoys[ri];
+            }
+
             int map_v = index * SCAN_COUNT + sidx;
             uint16_t src_port = 0;
-            if (args->map_to_srcport && args->map_to_srcport[map_v] > 0)
-                src_port = (uint16_t)args->map_to_srcport[map_v];
+            int use_reserved = (chosen_src_ip && args->local_ip && strcmp(chosen_src_ip, args->local_ip) == 0);
+            if (use_reserved)
+            {
+                if (args->map_to_srcport && args->map_to_srcport[map_v] > 0)
+                    src_port = (uint16_t)args->map_to_srcport[map_v];
+                else
+                {
+                    src_port = (uint16_t)(SRC_PORT_BASE + (map_v % SRC_PORT_RANGE));
+                    pthread_mutex_lock(&args->map_mutex);
+                    args->srcport_map[src_port] = map_v;
+                    pthread_mutex_unlock(&args->map_mutex);
+                }
+            }
             else
             {
-                /* if for some reason no preallocation exists, fall back to deterministic mapping */
-                src_port = (uint16_t)(SRC_PORT_BASE + (map_v % SRC_PORT_RANGE));
-                pthread_mutex_lock(&args->map_mutex);
-                args->srcport_map[src_port] = map_v;
-                pthread_mutex_unlock(&args->map_mutex);
+                /* decoy send: pick a random ephemeral source port (not tracked) */
+                src_port = (uint16_t)(1024 + (rand() % (65535 - 1024)));
             }
 
             // Determine flags for this scan and send
@@ -211,11 +332,11 @@ static void *scan_sender_worker(void *arg)
             int send_ret = -1;
             if (sidx == SCAN_IDX_UDP)
             {
-                send_ret = send_udp_probe(args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port);
+                send_ret = send_udp_probe(chosen_src_ip, args->ip, src_port, dst_port);
             }
             else
             {
-                send_ret = send_tcp_packet(args->raw_sock, args->local_ip ? args->local_ip : "0.0.0.0", args->ip, src_port, dst_port, flags);
+                send_ret = send_tcp_packet(args->raw_sock, chosen_src_ip, args->ip, src_port, dst_port, flags);
             }
 
             // Send result handling
@@ -238,7 +359,16 @@ static void *scan_sender_worker(void *arg)
             }
 
             // small delay between probes for same port
-            usleep(500);
+            if (args->evade)
+            {
+                /* randomized delay to evade simple IDS thresholds */
+                int jitter = 100 + (rand() % 2000); /* 100us..2100us */
+                usleep(jitter);
+            }
+            else
+            {
+                usleep(500);
+            }
         }
 
         // small delay to avoid flooding between ports
@@ -308,9 +438,19 @@ void start_scan(t_nmap_args *args)
                 pthread_join(threads_pool[i], NULL);
             }
 
-            free(threads_pool);
-            pthread_mutex_destroy(&args->mutex_port);
-            return;
+                /* Clean up resources allocated earlier in this path to avoid leaks
+                   (e.g., srcport_map and its mutex were allocated before attempting
+                    to open a raw socket). */
+                if (args->srcport_map)
+                {
+                    free(args->srcport_map);
+                    args->srcport_map = NULL;
+                }
+                pthread_mutex_destroy(&args->map_mutex);
+
+                free(threads_pool);
+                pthread_mutex_destroy(&args->mutex_port);
+                return;
         }
         else
         {

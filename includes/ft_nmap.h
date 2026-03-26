@@ -15,6 +15,9 @@
 # include <arpa/inet.h>
 # include <netdb.h>
 # include <errno.h>
+#ifndef NI_MAXHOST
+# define NI_MAXHOST 1025
+#endif
 /* libpcap */
 #include <pcap/pcap.h>
 
@@ -53,6 +56,7 @@
 typedef struct s_result {
     uint16_t    port;
     char        *service;
+    char        *banner; /* optional banner/version string obtained via TCP banner grab */
     uint8_t     scan_results[SCAN_COUNT]; /* per-scan-type status */
 } t_result;
 
@@ -82,6 +86,17 @@ typedef struct s_nmap_args {
     int             reserved_count;
     int             *map_to_srcport; /* maps composite map_v -> src_port */
     int             scan_done; /* flag set when scan finished (used by progress indicator) */
+    /* Bonus/extra flags */
+    char            *json_file; /* write results to JSON */
+    char            *pcap_file; /* optional pcap dump filename */
+    pcap_dumper_t   *pcap_dumper; /* opened dumper if pcap_file is set */
+    int             top_ports; /* if >0, use top N ports list */
+    char            *target_name; /* reverse DNS name for target if available */
+    /* Bonus: evasion / decoy options */
+    char            *decoy_list; /* comma-separated decoy IPs (string from args) */
+    char            **decoys;    /* parsed decoy IP array */
+    int             decoy_count;
+    int             evade;       /* boolean: enable timing randomization / jitter to evade IDS */
 } t_nmap_args;
 
 /* Function Prototypes */
@@ -97,6 +112,7 @@ char    *resolve_target_str(const char *name);
 void    start_scan(t_nmap_args *args);
 void    print_help(void);
 void    print_config(t_nmap_args *args);
+char    *grab_banner(t_nmap_args *args, uint16_t port);
 
 /* Packet/pcap helpers */
 int     send_syn_packet(int raw_sock, const char *src_ip, const char *dst_ip, uint16_t src_port, uint16_t dst_port);

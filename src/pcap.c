@@ -14,6 +14,11 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
 {
     (void)h; // unused
     t_nmap_args *args = (t_nmap_args *)user;
+    /* If requested, write captured packet to pcap dump file */
+    if (args->pcap_dumper)
+    {
+        pcap_dump((u_char *)args->pcap_dumper, h, bytes);
+    }
     /* Compute IP header offset based on datalink type */
     int l3_offset = 0;
     switch (args->pcap_dlt)
@@ -282,6 +287,14 @@ void *pcap_listener_thread(void *arg)
     /* Record datalink type so packet handler can compute offsets */
     args->pcap_dlt = pcap_datalink(args->pcap_handle);
 
+    /* If the user requested saving pcap to file, open dumper */
+    if (args->pcap_file)
+    {
+        args->pcap_dumper = pcap_dump_open(args->pcap_handle, args->pcap_file);
+        if (!args->pcap_dumper)
+            fprintf(stderr, "Warning: could not open pcap dump '%s'\n", args->pcap_file);
+    }
+
     // Build filter: capture TCP, UDP, ICMP packets from target IP
     struct bpf_program fp;
     char filter_exp[256];
@@ -313,6 +326,11 @@ void *pcap_listener_thread(void *arg)
     }
 
     pcap_close(args->pcap_handle);
+    if (args->pcap_dumper)
+    {
+        pcap_dump_close(args->pcap_dumper);
+        args->pcap_dumper = NULL;
+    }
     args->pcap_handle = NULL;
     return NULL;
 }

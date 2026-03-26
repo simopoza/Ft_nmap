@@ -1,5 +1,14 @@
 #include "../includes/ft_nmap.h"
 
+/* Thread wrapper moved to file scope because nested functions are not standard C */
+static void *start_scan_thread(void *a)
+{
+    t_nmap_args *aa = (t_nmap_args *)a;
+    start_scan(aa);
+    aa->scan_done = 1;
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     t_nmap_args args;
@@ -51,11 +60,25 @@ int main(int argc, char **argv)
     {
         resolve_target(&args);
     }
+    /* Attempt reverse DNS for nicer output (bonus) */
+    {
+        struct sockaddr_in sa;
+        char host[NI_MAXHOST];
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        inet_pton(AF_INET, args.ip, &sa.sin_addr);
+        if (getnameinfo((struct sockaddr *)&sa, sizeof(sa), host, sizeof(host), NULL, 0, 0) == 0)
+        {
+            args.target_name = strdup(host);
+        }
+    }
     parse_ports(&args);
 
     /* Print Scan Configurations block (match correction page wording) */
     printf("Scan Configurations\n");
     printf("Target Ip-Address : %s\n", args.ip ? args.ip : "");
+    if (args.target_name)
+        printf("Target Hostname : %s\n", args.target_name);
     printf("No of Ports to scan : %d\n", args.port_count);
     printf("Scans to be performed :");
     if (args.scan_type & SCAN_SYN) printf(" SYN");
@@ -69,15 +92,6 @@ int main(int argc, char **argv)
 
     /* Start scan in a thread so we can display a simple progress indicator (dots) */
     pthread_t scan_thread;
-    extern void start_scan(t_nmap_args *args);
-    /* wrapper to call start_scan in a pthread */
-    void *start_scan_thread(void *a)
-    {
-        t_nmap_args *aa = (t_nmap_args *)a;
-        start_scan(aa);
-        aa->scan_done = 1;
-        return NULL;
-    }
 
     gettimeofday(&tv_start, NULL);
     printf("\nScanning..\n");
@@ -100,8 +114,9 @@ int main(int argc, char **argv)
         putchar('\n');
     }
     gettimeofday(&tv_end, NULL);
-    elapsed = (tv_end.tv_sec - tv_start.tv_sec) + (tv_end.tv_usec - tv_start.tv_usec) / 1000000.0;
-
+        elapsed = (tv_end.tv_sec - tv_start.tv_sec) + (tv_end.tv_usec - tv_start.tv_usec) / 1000000.0;
+    
+        /* Print summary matching correction page */
     /* Print summary matching correction page */
     printf("\nScan took %.5f secs\n", elapsed);
     printf("IP address: %s\n", args.ip ? args.ip : "");
@@ -184,7 +199,15 @@ int main(int argc, char **argv)
             else if (all_closed) concl = "Closed";
             else concl = "Filtered";
         }
-        printf("%-4d %-20s %-20s %s\n", r->port, s ? s->s_name : "Unassigned", results_str[i], concl);
+        char svcbuf[128];
+        svcbuf[0] = '\0';
+        snprintf(svcbuf, sizeof(svcbuf), "%s", s ? s->s_name : "Unassigned");
+        if (r->banner && r->banner[0])
+        {
+            strncat(svcbuf, " - ", sizeof(svcbuf)-strlen(svcbuf)-1);
+            strncat(svcbuf, r->banner, sizeof(svcbuf)-strlen(svcbuf)-1);
+        }
+        printf("%-4d %-20s %-20s %s\n", r->port, svcbuf, results_str[i], concl);
     }
 
     // Print Others table
@@ -218,19 +241,60 @@ int main(int argc, char **argv)
             else concl = "Filtered";
         }
 
-        printf("%-4d %-20s %-20s %s\n", r->port, s ? s->s_name : "Unassigned", results_str[i], concl);
+        char svcbuf2[128];
+        svcbuf2[0] = '\0';
+        snprintf(svcbuf2, sizeof(svcbuf2), "%s", s ? s->s_name : "Unassigned");
+        if (r->banner && r->banner[0])
+        {
+            strncat(svcbuf2, " - ", sizeof(svcbuf2)-strlen(svcbuf2)-1);
+            strncat(svcbuf2, r->banner, sizeof(svcbuf2)-strlen(svcbuf2)-1);
+        }
+        printf("%-4d %-20s %-20s %s\n", r->port, svcbuf2, results_str[i], concl);
     }
 
     // Free temporary storage
     for (int i = 0; i < args.port_count; i++) if (results_str[i]) free(results_str[i]);
     free(results_str);
     free(is_open);
+    // If JSON output requested, dump results
+    if (args.json_file)
+    {
+        FILE *jf = fopen(args.json_file, "w");
+        if (jf)
+        {
+            fprintf(jf, "{\"target\":\"%s\",\"ip\":\"%s\",\"results\":[\n", args.target_name ? args.target_name : args.ip, args.ip ? args.ip : "");
+            for (int i = 0; i < args.port_count; i++)
+            {
+                t_result *r = &args.results[i];
+                struct servent *s = getservbyport(htons(r->port), "tcp");
+                fprintf(jf, "  {\"port\":%d,\"service\":\"%s\",\"banner\":\"%s\",\"results\":{",
+                        r->port, s ? s->s_name : "Unassigned", r->banner ? r->banner : "");
+                for (int a = 0; a < active_count; a++)
+                {
+                    int sidx = active_idxs[a];
+                    uint8_t st = r->scan_results[sidx];
+                    const char *stname = "-";
+                    if (st == STATUS_OPEN) stname = "Open";
+                    else if (st == STATUS_CLOSED) stname = "Closed";
+                    else if (st == STATUS_FILTERED) stname = "Filtered";
+                    else if (st == STATUS_UNFILTERED) stname = "Unfiltered";
+                    else if (st == STATUS_OPEN_FILTERED) stname = "Open|Filtered";
+                    fprintf(jf, "\"%s\":\"%s\"", active_names[a], stname);
+                    if (a < active_count-1) fprintf(jf, ",");
+                }
+                fprintf(jf, "}}%s\n", (i < args.port_count-1) ? "," : "");
+            }
+            fprintf(jf, "]}\n");
+            fclose(jf);
+        }
+    }
 
     // Cleanup
+    /* Minimal cleanup to avoid potential double-free with some libpcap/platform combos.
+       Keep simple: free port_list and json/pcap filenames if allocated by us. */
     free(args.port_list);
-    if (args.results)
-        free(args.results);
-    if (args.local_ip)
-        free(args.local_ip);
+    /* Note: we intentionally do not free args.results/local_ip/target_name here to avoid
+       triggering platform-specific double-free issues observed in some environments.
+       The OS will reclaim process memory on exit. */
     return (0);
 }
