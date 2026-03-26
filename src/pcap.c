@@ -68,7 +68,45 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
 
         pthread_mutex_lock(&args->map_mutex);
         int map_v = args->srcport_map[our_src];
-        if (map_v != -1)
+        if (map_v == -2)
+        {
+            /* Shared pool port: multiple map_v entries may map to this src port. Scan map_to_srcport. */
+            if (args->map_to_srcport)
+            {
+                int total = args->port_count * SCAN_COUNT;
+                for (int mv = 0; mv < total; mv++)
+                {
+                    if (args->map_to_srcport[mv] != our_src) continue;
+                    int idx = mv / SCAN_COUNT;
+                    int sidx = mv % SCAN_COUNT;
+                    if (sidx == SCAN_IDX_SYN)
+                    {
+                        if (syn && ack)
+                            args->results[idx].scan_results[sidx] = STATUS_OPEN;
+                        else if (rst)
+                            args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                    }
+                    else if (sidx == SCAN_IDX_ACK)
+                    {
+                        if (rst)
+                            args->results[idx].scan_results[sidx] = STATUS_UNFILTERED;
+                        else
+                            args->results[idx].scan_results[sidx] = STATUS_FILTERED;
+                    }
+                    else
+                    {
+                        if (rst)
+                            args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                        else
+                            args->results[idx].scan_results[sidx] = STATUS_OPEN;
+                    }
+                    /* mark this map entry as handled */
+                    args->map_to_srcport[mv] = -1;
+                }
+            }
+            args->srcport_map[our_src] = -1;
+        }
+        else if (map_v != -1)
         {
             int idx = map_v / SCAN_COUNT;
             int sidx = map_v % SCAN_COUNT;
@@ -109,7 +147,23 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
         uint16_t our_src = ntohs(udph->dest);
         pthread_mutex_lock(&args->map_mutex);
         int map_v = args->srcport_map[our_src];
-        if (map_v != -1)
+        if (map_v == -2)
+        {
+            if (args->map_to_srcport)
+            {
+                int total = args->port_count * SCAN_COUNT;
+                for (int mv = 0; mv < total; mv++)
+                {
+                    if (args->map_to_srcport[mv] != our_src) continue;
+                    int idx = mv / SCAN_COUNT;
+                    int sidx = mv % SCAN_COUNT;
+                    args->results[idx].scan_results[sidx] = STATUS_OPEN;
+                    args->map_to_srcport[mv] = -1;
+                }
+            }
+            args->srcport_map[our_src] = -1;
+        }
+        else if (map_v != -1)
         {
             int idx = map_v / SCAN_COUNT;
             int sidx = map_v % SCAN_COUNT;
@@ -135,6 +189,7 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
         struct icmphdr *icmph = (struct icmphdr *)(ip_ptr + ip_header_len);
         if (icmph->type == 3) /* Destination Unreachable */
         {
+            int code = icmph->code;
             const u_char *inner = ip_ptr + ip_header_len + sizeof(struct icmphdr);
             if ((size_t)(inner - bytes) + sizeof(struct iphdr) > h->caplen) return;
             struct iphdr *inner_iph = (struct iphdr *)inner;
@@ -147,12 +202,35 @@ static void packet_handler(u_char *user, const struct pcap_pkthdr *h, const u_ch
                 uint16_t our_src = ntohs(inner_udph->source);
                 pthread_mutex_lock(&args->map_mutex);
                 int map_v = args->srcport_map[our_src];
-                if (map_v != -1)
+                if (map_v == -2)
+                {
+                    if (args->map_to_srcport)
+                    {
+                        int total = args->port_count * SCAN_COUNT;
+                        for (int mv = 0; mv < total; mv++)
+                        {
+                            if (args->map_to_srcport[mv] != our_src) continue;
+                            int idx = mv / SCAN_COUNT;
+                            int sidx = mv % SCAN_COUNT;
+                            if (sidx == SCAN_IDX_UDP)
+                            {
+                                if (code == 3) args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                                else args->results[idx].scan_results[sidx] = STATUS_FILTERED;
+                            }
+                            args->map_to_srcport[mv] = -1;
+                        }
+                    }
+                    args->srcport_map[our_src] = -1;
+                }
+                else if (map_v != -1)
                 {
                     int idx = map_v / SCAN_COUNT;
                     int sidx = map_v % SCAN_COUNT;
                     if (sidx == SCAN_IDX_UDP)
-                        args->results[idx].scan_results[sidx] = STATUS_CLOSED; // ICMP port unreachable -> closed
+                    {
+                        if (code == 3) args->results[idx].scan_results[sidx] = STATUS_CLOSED;
+                        else args->results[idx].scan_results[sidx] = STATUS_FILTERED;
+                    }
                     else
                         args->results[idx].scan_results[sidx] = STATUS_CLOSED;
                     args->srcport_map[our_src] = -1;

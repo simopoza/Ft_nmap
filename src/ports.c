@@ -20,8 +20,9 @@ static void add_port(uint16_t port, bool *seen, t_nmap_args *args)
     }
     if (args->port_count >= MAX_PORTS_TO_SCAN)
     {
-        fprintf(stderr, "Error: Max ports to scan is %d. Truncating list.\n", MAX_PORTS_TO_SCAN);
-        exit(1);
+        /* Reached configured maximum; ignore additional ports instead of exiting */
+        fprintf(stderr, "Warning: Max ports to scan is %d. Ignoring additional ports.\n", MAX_PORTS_TO_SCAN);
+        return;
     }
     seen[port] = true;
     args->port_list[args->port_count++] = port;

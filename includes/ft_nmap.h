@@ -93,6 +93,7 @@ typedef struct s_nmap_args {
 int     parse_args(int argc, char **argv, t_nmap_args *args);
 void    parse_ports(t_nmap_args *args);
 void    resolve_target(t_nmap_args *args);
+char    *resolve_target_str(const char *name);
 void    start_scan(t_nmap_args *args);
 void    print_help(void);
 void    print_config(t_nmap_args *args);

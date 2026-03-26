@@ -22,17 +22,36 @@ test-args: $(NAME)
 	@echo "Running args unit test..."
 	./bin/test_args
 
+.PHONY: test-ports
+test-ports: $(NAME)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) src/ports.c tests/test_ports.c -o bin/test_ports
+	@echo "Running ports unit test..."
+	./bin/test_ports
+
+.PHONY: test-resolve
+test-resolve: $(NAME)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) src/resolve.c tests/test_resolve.c -o bin/test_resolve
+	@echo "Running resolve unit test..."
+	./bin/test_resolve
+
 .PHONY: test
-test: test-args
+
+test: test-args test-ports test-resolve
 	@mkdir -p bin
 	$(CC) $(CFLAGS) src/args.c tests/test_args_negative.c -o bin/test_args_negative
 	@echo "Running all tests..."
 	./bin/test_args; rc1=$$?; \
 	./bin/test_args_negative; rc2=$$?; \
-	TOTAL=2; \
+	./bin/test_ports; rc3=$$?; \
+	./bin/test_resolve; rc4=$$?; \
+	TOTAL=4; \
 	FAILED=0; \
 	if [ $$rc1 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
 	if [ $$rc2 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc3 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
+	if [ $$rc4 -ne 0 ]; then FAILED=$$((FAILED+1)); fi; \
 	PASSED=$$((TOTAL-FAILED)); \
 	echo "Summary: $$PASSED passed, $$FAILED failed out of $$TOTAL"; \
 	if [ $$FAILED -ne 0 ]; then exit 2; fi

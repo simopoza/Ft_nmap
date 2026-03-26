@@ -325,7 +325,8 @@ void start_scan(t_nmap_args *args)
                 for (int i = 0; i < args->port_count * SCAN_COUNT; i++) args->map_to_srcport[i] = -1;
             }
 
-            args->reserved_socks = malloc(sizeof(int) * (total_probes > 0 ? total_probes : 1));
+            /* We'll allocate reserved_socks based on pool size below */
+            args->reserved_socks = NULL;
             args->reserved_count = 0;
 
             /* seed PRNG for per-run randomness */
@@ -345,92 +346,121 @@ void start_scan(t_nmap_args *args)
 
             if (max_reservable < 0) max_reservable = 0;
 
-            for (int i = 0; i < args->port_count; i++)
+            /* Implement pool-based reservation: allocate a smaller pool of reserved ports
+               (<= max_reservable and <= total_probes) and assign probes to pool ports
+               in a round-robin fashion. This reduces FD usage while still allowing pcap
+               to filter on the pool of source ports. */
+            int pool_size = max_reservable;
+            if (pool_size > total_probes) pool_size = total_probes;
+            if (pool_size > 1024) pool_size = 1024; /* safety cap */
+
+            if (pool_size > 0)
             {
-                for (int sidx = 0; sidx < SCAN_COUNT; sidx++)
+                int *pool_ports = malloc(sizeof(int) * pool_size);
+                int *pool_socks = malloc(sizeof(int) * pool_size);
+                int pool_count = 0;
+                for (int p = 0; p < pool_size; p++) pool_socks[p] = -1;
+
+                for (int pi = 0; pi < pool_size; pi++)
                 {
-                    if (!(args->scan_type & scan_mask[sidx])) continue;
-                    int map_v = i * SCAN_COUNT + sidx;
-
-                    /* If we've already reserved near the FD limit, skip bind attempts and fallback */
-                    int chosen_port = -1;
+                    int attempts = 0;
+                    int chosen = -1;
                     int sockfd = -1;
-                    if (args->reserved_count < max_reservable)
+                    while (attempts < 5000)
                     {
-                        int attempts = 0;
-                        while (attempts < 5000)
+                        int r = rand() % SRC_PORT_RANGE;
+                        int cand = SRC_PORT_BASE + r;
+                        pthread_mutex_lock(&args->map_mutex);
+                        int used = args->srcport_map[cand];
+                        pthread_mutex_unlock(&args->map_mutex);
+                        if (used != -1) { attempts++; continue; }
+
+                        sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sockfd >= 0)
                         {
-                            int r = rand() % SRC_PORT_RANGE;
-                            int cand = SRC_PORT_BASE + r;
-                            pthread_mutex_lock(&args->map_mutex);
-                            int used = args->srcport_map[cand];
-                            pthread_mutex_unlock(&args->map_mutex);
-                            if (used != -1) { attempts++; continue; }
-
-                            /* Try to bind a UDP socket to reserve the port */
-                            sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-                            if (sockfd >= 0)
+                            struct sockaddr_in bind_addr;
+                            memset(&bind_addr, 0, sizeof(bind_addr));
+                            bind_addr.sin_family = AF_INET;
+                            bind_addr.sin_port = htons(cand);
+                            bind_addr.sin_addr.s_addr = INADDR_ANY;
+                            if (bind(sockfd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
                             {
-                                struct sockaddr_in bind_addr;
-                                memset(&bind_addr, 0, sizeof(bind_addr));
-                                bind_addr.sin_family = AF_INET;
-                                bind_addr.sin_port = htons(cand);
-                                bind_addr.sin_addr.s_addr = INADDR_ANY;
-                                if (bind(sockfd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
-                                {
-                                    chosen_port = cand;
-                                    break;
-                                }
-                                close(sockfd);
-                                sockfd = -1;
+                                chosen = cand;
+                                break;
                             }
-
-                            /* UDP bind failed; try TCP bind as a fallback to reserve the port for TCP as well */
-                            sockfd = socket(AF_INET, SOCK_STREAM, 0);
-                            if (sockfd >= 0)
-                            {
-                                int one = 1;
-                                setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-                                struct sockaddr_in bind_addr;
-                                memset(&bind_addr, 0, sizeof(bind_addr));
-                                bind_addr.sin_family = AF_INET;
-                                bind_addr.sin_port = htons(cand);
-                                bind_addr.sin_addr.s_addr = INADDR_ANY;
-                                if (bind(sockfd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
-                                {
-                                    chosen_port = cand;
-                                    break;
-                                }
-                                close(sockfd);
-                                sockfd = -1;
-                            }
-
-                            attempts++;
+                            close(sockfd);
+                            sockfd = -1;
                         }
+                        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+                        if (sockfd >= 0)
+                        {
+                            int one = 1;
+                            setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+                            struct sockaddr_in bind_addr;
+                            memset(&bind_addr, 0, sizeof(bind_addr));
+                            bind_addr.sin_family = AF_INET;
+                            bind_addr.sin_port = htons(cand);
+                            bind_addr.sin_addr.s_addr = INADDR_ANY;
+                            if (bind(sockfd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
+                            {
+                                chosen = cand;
+                                break;
+                            }
+                            close(sockfd);
+                            sockfd = -1;
+                        }
+                        attempts++;
                     }
-
-                    if (chosen_port == -1)
+                    if (chosen == -1)
                     {
-                        /* fallback deterministic choice (no bind) */
-                        chosen_port = SRC_PORT_BASE + (map_v % SRC_PORT_RANGE);
+                        /* if we couldn't bind a port, choose deterministic fallback */
+                        chosen = SRC_PORT_BASE + (pi % SRC_PORT_RANGE);
                         sockfd = -1;
                     }
-
-                    /* record mapping */
-                    if (args->map_to_srcport)
-                        args->map_to_srcport[map_v] = chosen_port;
+                    pool_ports[pool_count] = chosen;
+                    pool_socks[pool_count] = sockfd;
+                    pool_count++;
                     pthread_mutex_lock(&args->map_mutex);
-                    args->srcport_map[chosen_port] = map_v;
+                    args->srcport_map[chosen] = -2; /* mark as shared/multiplexed */
                     pthread_mutex_unlock(&args->map_mutex);
+                }
 
-                    /* store reserved socket (fd or -1) so we can close later */
-                    if (sockfd >= 0)
+                /* store pool into args so we can close sockets later and build filter */
+                if (args->reserved_socks) free(args->reserved_socks);
+                args->reserved_socks = malloc(sizeof(int) * pool_count);
+                args->reserved_count = pool_count;
+                for (int i = 0; i < pool_count; i++) args->reserved_socks[i] = pool_socks[i];
+
+                /* assign map_to_srcport by round-robin mapping into pool_ports */
+                if (args->map_to_srcport)
+                {
+                    for (int mv = 0; mv < args->port_count * SCAN_COUNT; mv++)
                     {
-                        args->reserved_socks[args->reserved_count++] = sockfd;
+                        int port = pool_ports[mv % pool_count];
+                        args->map_to_srcport[mv] = port;
                     }
-                    else
+                }
+
+                free(pool_ports);
+                free(pool_socks);
+            }
+            else
+            {
+                /* No reservation possible: fall back to per-probe deterministic mapping */
+                for (int i = 0; i < args->port_count; i++)
+                {
+                    for (int sidx = 0; sidx < SCAN_COUNT; sidx++)
                     {
-                        /* store placeholder for consistency */
+                        if (!(args->scan_type & scan_mask[sidx])) continue;
+                        int map_v = i * SCAN_COUNT + sidx;
+                        int chosen_port = SRC_PORT_BASE + (map_v % SRC_PORT_RANGE);
+                        if (args->map_to_srcport)
+                            args->map_to_srcport[map_v] = chosen_port;
+                        pthread_mutex_lock(&args->map_mutex);
+                        args->srcport_map[chosen_port] = map_v;
+                        pthread_mutex_unlock(&args->map_mutex);
+                        /* placeholder for reserved_socks array to keep cleanup logic simple */
+                        args->reserved_socks = realloc(args->reserved_socks, sizeof(int) * (args->reserved_count + 1));
                         args->reserved_socks[args->reserved_count++] = -1;
                     }
                 }
@@ -478,8 +508,8 @@ void start_scan(t_nmap_args *args)
             for (int i = 0; i < thread_count; i++)
                 pthread_join(threads_pool[i], NULL);
 
-            // Wait a bit for replies to arrive
-            sleep(2);
+            // Wait a bit for replies to arrive (increase slightly to allow service replies to UDP payloads)
+            sleep(3);
 
             // Stop pcap dispatch by breaking loop
             if (args->pcap_handle)
