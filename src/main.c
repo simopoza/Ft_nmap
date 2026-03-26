@@ -52,6 +52,9 @@ int main(int argc, char **argv)
         if (!args.ip)
         {
             fprintf(stderr, "Error: file %s contains no valid targets\n", args.file);
+            /* free allocated resources from parse_args before exiting to avoid leaks
+               when tests exec this binary with an empty file */
+            if (args.ports) free(args.ports);
             return 1;
         }
         resolve_target(&args);
@@ -289,12 +292,43 @@ int main(int argc, char **argv)
         }
     }
 
-    // Cleanup
-    /* Minimal cleanup to avoid potential double-free with some libpcap/platform combos.
-       Keep simple: free port_list and json/pcap filenames if allocated by us. */
-    free(args.port_list);
-    /* Note: we intentionally do not free args.results/local_ip/target_name here to avoid
-       triggering platform-specific double-free issues observed in some environments.
-       The OS will reclaim process memory on exit. */
+    // Full cleanup: free owned allocations to avoid leaks under sanitizers.
+    if (args.port_list) free(args.port_list);
+
+    // Free per-port results and any allocated banners
+    if (args.results)
+    {
+        for (int i = 0; i < args.port_count; i++)
+        {
+            if (args.results[i].banner) free(args.results[i].banner);
+            // args.results[i].service is not owned (getservbyport returns static)
+        }
+        free(args.results);
+        args.results = NULL;
+    }
+
+    // Free ports string allocated by parse_args (DEFAULT_PORTS or --top-ports)
+    if (args.ports) free(args.ports);
+
+    // Free local and target names if they were allocated
+    if (args.local_ip) free(args.local_ip);
+    if (args.target_name) free(args.target_name);
+
+    // If we read the target from a file, args.ip was strdup'd in main; free it
+    if (args.file && args.ip) free(args.ip);
+
+    // Free decoy list parsed in sender if present
+    if (args.decoys)
+    {
+        for (int i = 0; i < args.decoy_count; i++) if (args.decoys[i]) free(args.decoys[i]);
+        free(args.decoys);
+        args.decoys = NULL;
+    }
+
+    // Free any remaining mapping arrays if present
+    if (args.map_to_srcport) { free(args.map_to_srcport); args.map_to_srcport = NULL; }
+    if (args.srcport_map) { free(args.srcport_map); args.srcport_map = NULL; }
+    if (args.reserved_socks) { free(args.reserved_socks); args.reserved_socks = NULL; }
+
     return (0);
 }

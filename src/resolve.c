@@ -29,7 +29,15 @@ void resolve_target(t_nmap_args *args)
         fprintf(stderr, "Error: Could not resolve hostname '%s'\n", args->ip);
         exit(1);
     }
-    /* replace args->ip with allocated string */
+    /* replace args->ip with allocated string
+       If args->ip was previously heap-allocated (e.g. when read from a file),
+       free it to avoid leaking. When args->ip comes from argv (not owned) we
+       must not free it; main sets args->file when reading from a file, so use
+       that as an ownership indicator. */
+    if (args->file && args->ip)
+    {
+        free(args->ip);
+    }
     args->ip = res;
     printf("Resolved to %s\n", args->ip);
 }
