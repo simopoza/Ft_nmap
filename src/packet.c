@@ -1,3 +1,8 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#include <sys/types.h>
+#include <pcap/pcap.h>
 #include "../includes/ft_nmap.h"
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
