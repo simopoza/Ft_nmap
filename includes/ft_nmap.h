@@ -97,6 +97,7 @@ typedef struct s_nmap_args {
     char            **decoys;    /* parsed decoy IP array */
     int             decoy_count;
     int             evade;       /* boolean: enable timing randomization / jitter to evade IDS */
+    int             used_raw;    /* boolean: true when raw/pcap-based scans were used */
 } t_nmap_args;
 
 /* Function Prototypes */

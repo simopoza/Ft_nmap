@@ -421,7 +421,7 @@ void start_scan(t_nmap_args *args)
         pthread_mutex_init(&args->map_mutex, NULL);
 
         // Create raw socket for sending IP packets
-        args->raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    args->raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
         if (args->raw_sock < 0)
         {
             /* Non-root: raw socket unavailable. Quietly fall back to connect-scan worker
@@ -454,6 +454,8 @@ void start_scan(t_nmap_args *args)
         }
         else
         {
+            /* Mark that we successfully used the raw/pcap scanning path */
+            args->used_raw = 1;
             int one = 1;
             if (setsockopt(args->raw_sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0)
                 perror("setsockopt IP_HDRINCL");
@@ -739,9 +741,14 @@ void start_scan(t_nmap_args *args)
                 }
             }
 
-            // cleanup raw socket
+            // cleanup raw socket and mapping; mark srcport_map as NULL so main
+            // cleanup does not attempt to free it again
             close(args->raw_sock);
-            free(args->srcport_map);
+            if (args->srcport_map)
+            {
+                free(args->srcport_map);
+                args->srcport_map = NULL;
+            }
             pthread_mutex_destroy(&args->map_mutex);
         }
         // We already started and joined sender threads in SYN path; skip default worker start below

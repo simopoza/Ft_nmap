@@ -10,6 +10,9 @@ void    print_help(void)
     printf("  --ports    Ports to scan (e.g., 1-100, 22,80) [default 1-1024]\n");
     printf("  --speedup  Number of threads (max: 250) [default 0]\n");
     printf("  --scan     Scan type(s) (SYN, NULL, FIN, XMAS, ACK, UDP) [default ALL]\n");
+    printf("  --json     Write results as JSON to file\n");
+    printf("  --save-pcap Write captured packets to pcap file (raw-only, requires root)\n");
+    printf("  --top-ports N  Scan built-in top N common ports\n");
     printf("  --decoy    Comma-separated list of decoy IPs to spoof (best-effort, raw only)\n");
     printf("  --evade    Enable small timing jitter to try to evade naive IDS/firewalls\n");
 }

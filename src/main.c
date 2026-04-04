@@ -15,6 +15,10 @@ int main(int argc, char **argv)
     struct timeval tv_start, tv_end;
     double elapsed = 0.0;
 
+    /* Ensure all fields start zeroed to avoid freeing uninitialized pointers
+       later in main's cleanup, and to have predictable defaults. */
+    memset(&args, 0, sizeof(args));
+
     if (argc < 2)
     {
         print_help();
@@ -205,7 +209,10 @@ int main(int argc, char **argv)
         char svcbuf[128];
         svcbuf[0] = '\0';
         snprintf(svcbuf, sizeof(svcbuf), "%s", s ? s->s_name : "Unassigned");
-        if (r->banner && r->banner[0])
+        /* Banner grabbing is only done in connect-scan mode. In raw/pcap mode
+           we never populate banner, and memory corruption in the raw path
+           must not be able to crash printing, so ignore banner when used_raw. */
+        if (!args.used_raw && r->banner && r->banner[0])
         {
             strncat(svcbuf, " - ", sizeof(svcbuf)-strlen(svcbuf)-1);
             strncat(svcbuf, r->banner, sizeof(svcbuf)-strlen(svcbuf)-1);
@@ -247,7 +254,7 @@ int main(int argc, char **argv)
         char svcbuf2[128];
         svcbuf2[0] = '\0';
         snprintf(svcbuf2, sizeof(svcbuf2), "%s", s ? s->s_name : "Unassigned");
-        if (r->banner && r->banner[0])
+        if (!args.used_raw && r->banner && r->banner[0])
         {
             strncat(svcbuf2, " - ", sizeof(svcbuf2)-strlen(svcbuf2)-1);
             strncat(svcbuf2, r->banner, sizeof(svcbuf2)-strlen(svcbuf2)-1);
@@ -271,7 +278,8 @@ int main(int argc, char **argv)
                 t_result *r = &args.results[i];
                 struct servent *s = getservbyport(htons(r->port), "tcp");
                 fprintf(jf, "  {\"port\":%d,\"service\":\"%s\",\"banner\":\"%s\",\"results\":{",
-                        r->port, s ? s->s_name : "Unassigned", r->banner ? r->banner : "");
+            r->port, s ? s->s_name : "Unassigned",
+            (!args.used_raw && r->banner) ? r->banner : "");
                 for (int a = 0; a < active_count; a++)
                 {
                     int sidx = active_idxs[a];
@@ -295,12 +303,13 @@ int main(int argc, char **argv)
     // Full cleanup: free owned allocations to avoid leaks under sanitizers.
     if (args.port_list) free(args.port_list);
 
-    // Free per-port results and any allocated banners
+    // Free per-port results and any allocated banners (only in connect-scan mode).
     if (args.results)
     {
         for (int i = 0; i < args.port_count; i++)
         {
-            if (args.results[i].banner) free(args.results[i].banner);
+            if (!args.used_raw && args.results[i].banner)
+                free(args.results[i].banner);
             // args.results[i].service is not owned (getservbyport returns static)
         }
         free(args.results);
@@ -310,12 +319,15 @@ int main(int argc, char **argv)
     // Free ports string allocated by parse_args (DEFAULT_PORTS or --top-ports)
     if (args.ports) free(args.ports);
 
-    // Free local and target names if they were allocated
-    if (args.local_ip) free(args.local_ip);
-    if (args.target_name) free(args.target_name);
+     // Free local and target names if they were allocated
+     if (args.local_ip) free(args.local_ip);
+     if (args.target_name) free(args.target_name);
 
-    // If we read the target from a file, args.ip was strdup'd in main; free it
-    if (args.file && args.ip) free(args.ip);
+     /* args->ip always points to a heap-allocated string after
+         resolve_target() (which calls resolve_target_str/strdup),
+         regardless of whether it originally came from argv or from
+         a file. So at program end we can always free it. */
+     if (args.ip) free(args.ip);
 
     // Free decoy list parsed in sender if present
     if (args.decoys)
